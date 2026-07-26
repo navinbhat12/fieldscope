@@ -1,0 +1,36 @@
+# Data — never commit. Raw sources are multi-GB and re-downloadable via scripts/.
+data/
+
+# Private planning doc — career framing and resume strategy. Stays local.
+PROJECT_BRIEF.md
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.python-version
+*.egg-info/
+.ipynb_checkpoints/
+
+# Spark
+spark-warehouse/
+metastore_db/
+derby.log
+
+# Node / frontend (added in Phase 5)
+node_modules/
+.next/
+dist/
+.wrangler/
+
+# Env & secrets
+.env
+.env.local
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Local Claude Code config — points at the private brief.
+CLAUDE.md
