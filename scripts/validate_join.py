@@ -19,14 +19,13 @@ from collections import Counter
 from pathlib import Path
 
 import geopandas as gpd
-import numpy as np
 import pandas as pd
 import rasterio
 from rasterio.mask import mask
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from fieldscope.config import CDL_YEAR, DEFAULT_AOI, EQUAL_AREA, PROCESSED, RAW  # noqa: E402
+from fieldscope.config import CDL_YEAR, DEFAULT_AOI, EQUAL_AREA, PROCESSED, RAW
 
 SAMPLE_UNITS = 6
 

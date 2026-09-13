@@ -21,7 +21,7 @@ from rasterio.warp import transform_bounds
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from fieldscope.config import CDL_YEAR, DEFAULT_AOI, RAW, WGS84  # noqa: E402
+from fieldscope.config import CDL_YEAR, DEFAULT_AOI, RAW, WGS84
 
 SERVICE = "https://nassgeodata.gmu.edu/axis2/services/CDLService/GetCDLFile"
 

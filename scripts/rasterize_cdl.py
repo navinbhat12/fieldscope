@@ -28,7 +28,7 @@ from rasterio.windows import Window
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from fieldscope.config import CDL_YEAR, DEFAULT_AOI, INTERIM, RAW  # noqa: E402
+from fieldscope.config import CDL_YEAR, DEFAULT_AOI, INTERIM, RAW
 
 # Pixels per side per output file. Sized so both AOIs land on a sensible
 # partition count: a county produces a handful of files, the state ~150.

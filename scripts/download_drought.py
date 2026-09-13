@@ -21,7 +21,7 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from fieldscope.config import RAW, WGS84  # noqa: E402
+from fieldscope.config import RAW, WGS84
 
 BASE = "https://droughtmonitor.unl.edu/data/shapefiles_m/USDM_{stamp}_M.zip"
 
@@ -32,7 +32,10 @@ def recent_valid_dates(n: int = 4):
     That map is published the following Thursday, so the most recent Tuesday
     may not exist yet. Walk backwards until one resolves.
     """
-    today = date.today()
+    # Local date rather than UTC is deliberate: the worst a timezone boundary can
+    # do is shift the first candidate by a week, and the caller walks backwards
+    # through candidates until one resolves, so it self-corrects.
+    today = date.today()  # noqa: DTZ011
     tuesday = today - timedelta(days=(today.weekday() - 1) % 7)
     return [tuesday - timedelta(weeks=i) for i in range(n)]
 

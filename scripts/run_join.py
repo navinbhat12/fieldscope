@@ -45,9 +45,9 @@ from pyspark.sql import functions as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from fieldscope.cdl_classes import CDL_CLASSES, NON_AGRICULTURAL  # noqa: E402
-from fieldscope.config import DEFAULT_AOI, EQUAL_AREA, INTERIM, PROCESSED, RAW, WGS84  # noqa: E402
-from fieldscope.spark_session import build  # noqa: E402
+from fieldscope.cdl_classes import CDL_CLASSES, NON_AGRICULTURAL
+from fieldscope.config import DEFAULT_AOI, EQUAL_AREA, INTERIM, PROCESSED, RAW, WGS84
+from fieldscope.spark_session import build
 
 PIXEL_M2 = 30.0 * 30.0
 ACRES_PER_PIXEL = PIXEL_M2 / 4046.8564224
@@ -206,7 +206,11 @@ def main() -> None:
     ).cache()
 
     n_rows = overlay.count()
-    out = PROCESSED / f"overlay_{aoi.slug}.parquet"
+    # A sampled run writes somewhere else so it cannot clobber the full output.
+    # validate_join.py reads the unsuffixed path and diffs it against a
+    # ground truth computed over the whole raster, so a partial overlay left
+    # there reports a spurious FAIL that looks like a correctness regression.
+    out = PROCESSED / f"overlay_{aoi.slug}{'_sample' if limit else ''}.parquet"
     overlay.coalesce(1).write.mode("overwrite").parquet(str(out))
 
     log(f"precomputed rows: {n_rows:,}")

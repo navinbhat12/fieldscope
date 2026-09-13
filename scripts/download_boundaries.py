@@ -14,7 +14,7 @@ import requests
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1] / "src"))
 
-from fieldscope.config import DEFAULT_AOI, RAW, WGS84  # noqa: E402
+from fieldscope.config import DEFAULT_AOI, RAW, WGS84
 
 CB_URL = "https://www2.census.gov/geo/tiger/GENZ2023/shp/cb_2023_us_county_500k.zip"
 

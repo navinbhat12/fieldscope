@@ -10,12 +10,11 @@ from collections import Counter
 from pathlib import Path
 
 import geopandas as gpd
-import numpy as np
 import rasterio
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from fieldscope.config import CDL_YEAR, DEFAULT_AOI, EQUAL_AREA, RAW  # noqa: E402
+from fieldscope.config import CDL_YEAR, DEFAULT_AOI, EQUAL_AREA, RAW
 
 
 def rule(title: str) -> None:
@@ -44,11 +43,13 @@ def main() -> None:
         band = src.read(1)
         cdl_bounds_ll = gpd.GeoSeries.from_wkt(
             [
-                f"POLYGON(({src.bounds.left} {src.bounds.bottom},"
-                f"{src.bounds.right} {src.bounds.bottom},"
-                f"{src.bounds.right} {src.bounds.top},"
-                f"{src.bounds.left} {src.bounds.top},"
-                f"{src.bounds.left} {src.bounds.bottom}))"
+                (
+                    f"POLYGON(({src.bounds.left} {src.bounds.bottom},"
+                    f"{src.bounds.right} {src.bounds.bottom},"
+                    f"{src.bounds.right} {src.bounds.top},"
+                    f"{src.bounds.left} {src.bounds.top},"
+                    f"{src.bounds.left} {src.bounds.bottom}))"
+                )
             ],
             crs=src.crs,
         ).to_crs("EPSG:4326")

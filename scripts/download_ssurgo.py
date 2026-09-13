@@ -23,7 +23,7 @@ import shapely
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from fieldscope.config import DEFAULT_AOI, RAW, WGS84  # noqa: E402
+from fieldscope.config import DEFAULT_AOI, RAW, WGS84
 
 WFS = (
     "https://sdmdataaccess.sc.egov.usda.gov/Spatial/SDMWGS84Geographic.wfs"
@@ -85,7 +85,7 @@ def main() -> None:
             try:
                 gdf = fetch_tile(tile)
                 break
-            except Exception as exc:  # noqa: BLE001 - transient WFS failures are expected
+            except Exception as exc:  # transient WFS failures are expected
                 if attempt == 2:
                     raise
                 print(f"  tile {i} attempt {attempt + 1} failed ({exc}); retrying")
