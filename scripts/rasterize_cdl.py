@@ -15,6 +15,7 @@ the data warrants, and int32 halves the size of the largest table in the
 pipeline versus float64.
 """
 
+import argparse
 import shutil
 import sys
 import time
@@ -28,7 +29,7 @@ from rasterio.windows import Window
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from fieldscope.config import CDL_YEAR, DEFAULT_AOI, INTERIM, RAW
+from fieldscope.config import AOIS, CDL_YEAR, DEFAULT_AOI, INTERIM, RAW, resolve_aoi
 
 # Pixels per side per output file. Sized so both AOIs land on a sensible
 # partition count: a county produces a handful of files, the state ~150.
@@ -51,7 +52,10 @@ def blocks(width: int, height: int, size: int):
 
 
 def main() -> None:
-    aoi = DEFAULT_AOI
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--aoi", choices=sorted(AOIS), default=None,
+                    help=f"override DEFAULT_AOI ({DEFAULT_AOI.slug}) for this run only")
+    aoi = resolve_aoi(ap.parse_args().aoi)
     src_path = RAW / f"cdl_{CDL_YEAR}_{aoi.slug}.tif"
     out_dir = INTERIM / f"cdl_points_{aoi.slug}"
 

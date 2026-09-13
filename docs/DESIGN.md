@@ -193,9 +193,32 @@ update path.
 **Status:** open; next milestone
 
 **Context.** Indiana has 1,341,119 soil polygons against 104,126,688 land
-cover records, projecting to roughly 1.6 GB of geometry. The broadcast
-strategy of §5.3 cannot survive this — it will exceed the broadcast threshold
-or exhaust the driver.
+cover records, in 2.12 GB of geometry. The broadcast strategy of §5.3 cannot
+survive this.
+
+**Measured, not assumed.** `scripts/broadcast_limit.py` holds the point side
+fixed at 2,000,000 and scales only the polygon side, so the single variable is
+the size of the thing being broadcast. Each rung runs in its own subprocess,
+because a JVM that has thrown `OutOfMemoryError` cannot be trusted to report
+the next rung honestly.
+
+| Polygons | Outcome | Join time |
+|---|---|---|
+| 30,000 | ok | 6.2s |
+| 100,000 | ok | 11.1s |
+| 300,000 | ok | 37.5s |
+| 600,000 | **`OutOfMemoryError: Java heap space`** | — |
+
+So broadcast stops working between 300,000 and 600,000 polygons at an 8 GB
+driver heap, and Indiana needs 1,341,119 — past the limit by at least 2.2×.
+Note the time column as well: 3× the polygons from 100k to 300k cost 3.4× the
+time, so the strategy was already scaling badly before it stopped scaling at
+all.
+
+The failure is heap exhaustion while assembling the broadcast, not Spark
+refusing an over-large broadcast relation. That distinction matters because
+the two have different remedies — a bigger driver would move this threshold,
+and no driver size reaches 1.34M polygons on a 17 GB machine.
 
 **Options.**
 
@@ -340,9 +363,10 @@ specific past week is honest in a way that inventing values is not.
 single current one — which is worth knowing before §5.6 fixes the key schema,
 not after.
 
-### 5.10 Out-of-state polygons in the state download — OPEN
+### 5.10 Out-of-state polygons in the state download — keep them
 
-**Status:** open; cheap, but measure before assuming
+**Status:** decided against filtering, on measurement that contradicted the
+reasoning
 
 **Context.** WFS is queried by bounding box, and Indiana's bounding box
 overlaps four other states. 141,247 of the 1,482,366 polygons downloaded —
@@ -359,17 +383,36 @@ fraction is paid in shuffle volume and index build time, not just memory.
    becomes multi-state.
 2. Filter on `areasymbol LIKE 'IN%'` before the join.
 
-**Leaning.** Option 2 — one predicate that removes work which almost certainly
-cannot produce output, since the land cover raster is clipped to Indiana and
-SSURGO survey areas follow county and state lines rather than crossing them.
+**The reasoning that favoured option 2, and why it was wrong.** The argument
+was that the land cover raster is clipped to Indiana and SSURGO survey areas
+follow state lines, so no Indiana pixel could fall inside a neighbouring
+state's polygon. That sounded right and is false.
 
-**What to check first.** "Almost certainly" is doing real work in that
-sentence. Survey area boundaries are *administratively* aligned to state lines,
-but the two datasets are independently produced, so a border pixel could
-legitimately fall inside a neighbouring state's polygon where the two
-representations disagree by a few metres. The filter should be validated by
-running the join both ways on a border county and diffing the matched counts,
-not adopted because the reasoning sounds right.
+**Decision: option 1, keep them.** Tested on Posey County, which sits on both
+the Illinois and Kentucky lines — both rivers, so the hard case rather than a
+convenient one — joining its land cover against every nearby polygon in
+GeoPandas, a separate implementation from the Spark path:
+
+| | |
+|---|---|
+| Pixels in the county's extent | 1,289,851 |
+| Matched to Indiana soil | 1,287,624 |
+| **Matched to out-of-state soil** | **2,227 (0.17%)** |
+| **Matched to *both*** | **0** |
+
+The last row is the decisive one. Those 2,227 pixels have no Indiana polygon
+covering them at all, so filtering would not remove a redundant match — it
+would convert them from matched to unmatched. Real loss, not deduplication.
+They fall in Illinois and Kentucky survey areas (IL193, KY101, IL059, KY635,
+IL185), which is unsurprising in hindsight: soil does not stop at a state
+line even though the survey administration that maps it does.
+
+**Consequence.** The partitioned join carries 9.5% more geometry than it
+strictly needs for interior land. That is the price of not silently losing
+border coverage, and it is the right way round for a project whose headline
+correctness claim is a 90.21% match rate reconciled against an independent
+computation. Revisit only if shuffle volume becomes the binding constraint,
+and then as a stated accuracy trade rather than a free optimisation.
 
 ---
 

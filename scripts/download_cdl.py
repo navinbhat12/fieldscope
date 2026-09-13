@@ -9,6 +9,7 @@ This raster is where the record count comes from: Indiana is ~94,000 km2,
 which at 30m is roughly 105 million pixels.
 """
 
+import argparse
 import re
 import sys
 import warnings
@@ -21,7 +22,7 @@ from rasterio.warp import transform_bounds
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from fieldscope.config import CDL_YEAR, DEFAULT_AOI, RAW, WGS84
+from fieldscope.config import AOIS, CDL_YEAR, DEFAULT_AOI, RAW, WGS84, resolve_aoi
 
 SERVICE = "https://nassgeodata.gmu.edu/axis2/services/CDLService/GetCDLFile"
 
@@ -78,7 +79,10 @@ def state_raster(state_fips: str, year: int) -> Path:
 
 
 def main() -> None:
-    aoi = DEFAULT_AOI
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--aoi", choices=sorted(AOIS), default=None,
+                    help=f"override DEFAULT_AOI ({DEFAULT_AOI.slug}) for this run only")
+    aoi = resolve_aoi(ap.parse_args().aoi)
     src_path = state_raster(aoi.state_fips, CDL_YEAR)
 
     out = RAW / f"cdl_{CDL_YEAR}_{aoi.slug}.tif"

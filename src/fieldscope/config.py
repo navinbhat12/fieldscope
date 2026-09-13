@@ -58,5 +58,16 @@ INDIANA = AOI(
 
 DEFAULT_AOI = TIPPECANOE
 
+# Every defined area, by slug. Scripts expose this as --aoi so a state-scale
+# run can be driven without editing DEFAULT_AOI, which would move every stage
+# of the pipeline at once -- unhelpful while county and state scopes are being
+# compared against each other.
+AOIS = {a.slug: a for a in (TIPPECANOE, INDIANA)}
+
+
+def resolve_aoi(slug: str | None) -> AOI:
+    """The AOI named by slug, or DEFAULT_AOI when none is given."""
+    return AOIS[slug] if slug else DEFAULT_AOI
+
 # CDL release year to pull. 2025 is the current national release.
 CDL_YEAR = 2025

@@ -44,9 +44,7 @@ import shapely
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from fieldscope.config import DEFAULT_AOI, INDIANA, INTERIM, RAW, TIPPECANOE, WGS84
-
-AOIS = {a.slug: a for a in (TIPPECANOE, INDIANA)}
+from fieldscope.config import AOIS, DEFAULT_AOI, INTERIM, RAW, WGS84, resolve_aoi
 
 WFS = (
     "https://sdmdataaccess.sc.egov.usda.gov/Spatial/SDMWGS84Geographic.wfs"
@@ -170,7 +168,7 @@ def main() -> None:
                     help=f"override DEFAULT_AOI ({DEFAULT_AOI.slug}) for this run only")
     args = ap.parse_args()
 
-    aoi = AOIS[args.aoi] if args.aoi else DEFAULT_AOI
+    aoi = resolve_aoi(args.aoi)
     out = RAW / f"ssurgo_{aoi.slug}.parquet"
     if out.exists() and not args.pilot:
         print(f"already have {out.name}, skipping")
