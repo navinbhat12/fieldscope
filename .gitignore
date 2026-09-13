@@ -32,5 +32,5 @@ dist/
 .vscode/
 .idea/
 
-# Local Claude Code config — points at the private brief.
+# Local Claude Code config. Stays local.
 CLAUDE.md

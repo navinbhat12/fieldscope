@@ -259,6 +259,31 @@ rather than the run; idempotent re-invocation; retry with backoff; and
 deduplication across tile seams — already handled at county scale, where
 30,671 fetched features deduplicated to 30,264.
 
+### 5.9 An honest drought layer in the demo — OPEN
+
+**Status:** open; blocks the frontend milestone
+
+**Context.** The pipeline correctly reports that Indiana has essentially no
+drought. Tippecanoe has none at all, and statewide the worst class present is
+D0 ("abnormally dry"). The layer is therefore truthful and empty, which makes
+for a demo that appears broken.
+
+**Options.**
+
+1. Synthesize drought values so the layer renders. Rejected — it would put
+   fabricated data in a pipeline whose entire premise is real public data.
+2. Also load a historical week from the USDM archive, which goes back to 1999,
+   and let the UI select between weeks. 2012 was a severe drought year in
+   Indiana. The archive uses the same URL pattern as the current release, so
+   the acquisition script barely changes.
+
+**Leaning.** Option 2. The historical week is real data, and labelling it as a
+specific past week is honest in a way that inventing values is not.
+
+**Consequence.** The serving store must key on the drought week, not assume a
+single current one — which is worth knowing before §5.6 fixes the key schema,
+not after.
+
 ---
 
 ## 6. Correctness
@@ -295,5 +320,10 @@ repository cites that, the sample size, and the hardware.
 | 3 | State-scale join strategy (§5.5) + Indiana run | next |
 | 4 | Serving key design (§5.6) and store (§5.7) | open |
 | 5 | Edge API + measured multi-region latency | open |
-| 6 | Map frontend, public demo | open |
+| 6 | Map frontend, public demo — needs §5.9 first | open |
 | 7 | Scheduled weekly drought refresh (cheap, by §5.4) | stretch |
+
+Milestone 3 is the load-bearing one: it is where the broadcast strategy of §5.3
+stops working and the join has to become genuinely distributed. It also settles
+the output size that §5.6 and §5.7 depend on, which is why it comes before the
+serving work rather than after it.

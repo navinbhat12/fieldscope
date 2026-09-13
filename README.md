@@ -143,7 +143,14 @@ docs/        DESIGN.md — problem statement and decision record
 ## Running it
 
 Requires Java 17 and Python 3.11. Both are pinned deliberately: Spark 3.5 and
-Sedona 1.7 are not tested against newer runtimes and fail in unhelpful ways.
+Sedona 1.7 are not tested against newer runtimes and fail in unhelpful ways —
+a newer JDK or Python will not merely warn, it will fail obscurely.
+
+On macOS, `brew install openjdk@17`; the session builder looks for it at
+`/opt/homebrew/opt/openjdk@17` and sets `JAVA_HOME` itself, so no shell
+configuration is needed. Sedona's JVM artifacts resolve from Maven on first
+run and cache in `~/.ivy2` (~121 MB, one time), which is why the first Spark
+start after a clean checkout is slow.
 
 ```bash
 uv sync
@@ -171,6 +178,20 @@ came back identical.
 Switching from county to statewide is a one-line change to `DEFAULT_AOI` in
 `src/fieldscope/config.py`, but the join will not survive it as currently
 written; see [docs/DESIGN.md §5.5](docs/DESIGN.md).
+
+### Watching a long run
+
+Three things that cost real debugging time, recorded so they cost it once:
+
+- Use `python -u`, and don't pipe a running job through `grep` or `head`.
+  Python block-buffers to a pipe and those tools buffer again; together they
+  mean a live job emits an empty log and you debug blind.
+- macOS has no `timeout`. Put a watchdog on anything long:
+  `( sleep 480 && pkill -f 'fieldscope-join' ) & WD=$!` — then `kill $WD`
+  once it finishes.
+- Sample with `--limit`, which samples *randomly*. Records are written in
+  raster scan order, so a plain `LIMIT` returns a thin strip of the top edge.
+  That understated the match rate as 31% and made throughput meaningless.
 
 ## Progress
 
