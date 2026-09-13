@@ -33,6 +33,10 @@ This batch/serving split is the core design decision — the heavy computation
 and the low-latency serving path have completely different scaling
 characteristics and are deliberately decoupled.
 
+**[docs/DESIGN.md](docs/DESIGN.md)** records each decision with the constraint
+that forced it, the alternatives considered, and the measured consequence —
+including the ones still open.
+
 ## Architecture
 
 ```
@@ -59,21 +63,31 @@ OFFLINE (batch, scheduled)              ONLINE (always on, edge)
 Scope is Indiana. The pipeline is developed against a single county for fast
 iteration, then run unchanged across the state.
 
-| | Tippecanoe County _(measured)_ | Indiana (target) |
+| | Tippecanoe County | Indiana |
 |---|---|---|
-| Land cover records | 2,079,440 | ~105,000,000 |
-| Soil polygons | 30,264 | ~800,000 |
+| Land cover records | 2,079,440 | 104,126,688 |
+| Soil polygons | 30,264 | 1,341,119 |
 | Distinct soil map units | 429 | — |
-| Raw input size | ~40 MB | ~1–2 GB |
-| **Join wall time** | **56.6s** | — |
-| **Throughput** | **36,717 records/sec** | — |
+| Soil geometry on disk | 36.6 MB | ~1.6 GB _(projected)_ |
+| **Join wall time** | **median 20.5s** | — |
+| **Throughput** | **~101,000 records/sec** | — |
 | Records matched to soil | 1,875,956 (90.2%) | — |
 | Precomputed output rows | 5,349 (389:1 compression) | — |
 
-Measured on a 10-core local Spark session. The 90.2% match rate is not data
-loss — soil polygons cover 90.3% of the raster footprint, the remainder being
-open water and unsurveyed land. The two figures were computed independently
-and agree to within 0.1%.
+Both Indiana input counts are measured, not extrapolated — land cover from the
+state raster directly, soil polygons from a Soil Data Access aggregate query.
+The join itself has not yet been run at state scale; see
+[docs/DESIGN.md §5.5](docs/DESIGN.md) for why the current strategy will not
+survive it.
+
+Timings come from `scripts/benchmark.py` on a 10-core local Spark session:
+median of 11 runs, range 14.6–54.3s. That spread is JVM warmup and page cache
+state, not variation in the work — no single-run figure is quoted anywhere in
+this repository.
+
+The 90.2% match rate is not data loss — soil polygons cover 90.3% of the
+raster footprint, the remainder being open water and unsurveyed land. The two
+figures were computed independently and agree to within 0.1%.
 
 ### Correctness
 
@@ -85,8 +99,9 @@ sampled soil map units match exactly, the sixth differs by one pixel in
 
 ### Getting there
 
-Three defects had to be fixed before the join was usable, each worth roughly
-an order of magnitude:
+Three defects had to be fixed before the join was usable. None of them are
+things the query planner gets right on its own. Their individual contributions
+have not been isolated and measured, so no per-fix speedup is claimed:
 
 1. Spark built its spatial index over the 2.1M-row side and broadcast that —
    a single-threaded index build over the largest table in the job. Forcing
@@ -119,11 +134,10 @@ time are documented in comments at the top of each script.
 ## Repository layout
 
 ```
-scripts/     one script per dataset, plus the exploration report
+scripts/     one script per dataset, plus the join, validation and benchmark
 src/         pipeline package; config.py defines the areas of interest
 data/        gitignored — everything here is re-downloadable
-notebooks/   exploration
-docs/        design notes
+docs/        DESIGN.md — problem statement and decision record
 ```
 
 ## Running it
@@ -140,10 +154,23 @@ uv sync
 .venv/bin/python scripts/download_drought.py
 
 .venv/bin/python scripts/explore.py     # sanity report over the downloaded data
+
+# the join
+.venv/bin/python -u scripts/rasterize_cdl.py           # raster -> 2.08M Parquet rows
+.venv/bin/python -u scripts/run_join.py --limit 100000 # sample first, ~14s
+.venv/bin/python -u scripts/run_join.py                # full run
+.venv/bin/python -u scripts/validate_join.py           # diff against single-machine truth
+.venv/bin/python -u scripts/benchmark.py --runs 7      # median + range, not one run
 ```
 
-To switch from county to statewide, change `DEFAULT_AOI` in
-`src/fieldscope/config.py`. Nothing else changes.
+`data/` is gitignored; everything in it rebuilds from the scripts above. The
+whole pipeline was reproduced from a clean machine after a hardware reimage,
+and every correctness figure — down to a known single-pixel edge artifact —
+came back identical.
+
+Switching from county to statewide is a one-line change to `DEFAULT_AOI` in
+`src/fieldscope/config.py`, but the join will not survive it as currently
+written; see [docs/DESIGN.md §5.5](docs/DESIGN.md).
 
 ## Progress
 

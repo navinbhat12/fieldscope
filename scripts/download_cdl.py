@@ -11,6 +11,7 @@ which at 30m is roughly 105 million pixels.
 
 import re
 import sys
+import warnings
 from pathlib import Path
 
 import rasterio
@@ -25,6 +26,28 @@ from fieldscope.config import CDL_YEAR, DEFAULT_AOI, RAW, WGS84  # noqa: E402
 SERVICE = "https://nassgeodata.gmu.edu/axis2/services/CDLService/GetCDLFile"
 
 
+def _get(url: str, **kw):
+    """Fetch from CropScape, tolerating their expired certificate.
+
+    CropScape's TLS certificate expired 2026-09-10 and George Mason has not
+    renewed it, so a verified request dies with CERTIFICATE_VERIFY_FAILED.
+    Verified is still attempted first, so this repairs itself the moment the
+    certificate is renewed -- and the fallback should be deleted once it is.
+
+    Skipping verification is defensible *here* specifically: the payload is
+    public, read-only, federal raster data carrying no credentials, and it is
+    checked downstream anyway -- pixel values have to land in the CDL class
+    table, and the county's crop mix is a known quantity. It would not be
+    defensible on a request that authenticated or sent anything.
+    """
+    try:
+        return requests.get(url, **kw)
+    except requests.exceptions.SSLError:
+        print("  !! upstream TLS certificate invalid -- retrying unverified", flush=True)
+        warnings.filterwarnings("ignore", message="Unverified HTTPS request")
+        return requests.get(url, verify=False, **kw)
+
+
 def state_raster(state_fips: str, year: int) -> Path:
     cached = RAW / f"cdl_{year}_state{state_fips}.tif"
     if cached.exists():
@@ -32,7 +55,7 @@ def state_raster(state_fips: str, year: int) -> Path:
         return cached
 
     print(f"asking CropScape for CDL {year}, state FIPS {state_fips} ...")
-    meta = requests.get(SERVICE, params={"year": year, "fips": state_fips}, timeout=300)
+    meta = _get(SERVICE, params={"year": year, "fips": state_fips}, timeout=300)
     meta.raise_for_status()
     m = re.search(r"<returnURL>(.*?)</returnURL>", meta.text)
     if not m:
@@ -40,7 +63,7 @@ def state_raster(state_fips: str, year: int) -> Path:
     url = m.group(1)
 
     print(f"downloading {url} ...")
-    with requests.get(url, stream=True, timeout=900) as r:
+    with _get(url, stream=True, timeout=900) as r:
         r.raise_for_status()
         total = int(r.headers.get("content-length", 0))
         done = 0
