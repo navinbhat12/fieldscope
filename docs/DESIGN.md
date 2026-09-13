@@ -192,6 +192,25 @@ or exhaust the driver.
 **Leaning.** Option 1. Option 2 sidesteps the actual problem rather than
 solving it.
 
+**Mechanism.** Sedona ships both strategies as separate physical operators —
+`BroadcastIndexJoinExec`, which §5.3 currently forces, and `RangeJoinExec`,
+which spatially partitions both sides and joins each partition locally. So the
+work is selecting and tuning the second, not implementing it. The knobs that
+matter:
+
+| Setting | Role |
+|---|---|
+| `autoBroadcastJoinThreshold` | decides broadcast vs. partitioned; Indiana crosses it |
+| `joinGridType` | the partitioner: `KDBTREE`, `QUADTREE`, `EQUALGRID`, `ZORDER`, `QUADTREE_RTREE` |
+| `joinSpartitionDominantSide` | which side's distribution drives partition boundaries (`LEFT`/`RIGHT`/`NONE`) |
+| `fallbackPartitionNum` | partition count, trading parallelism against shuffle |
+| `useIndex` / `indexType` | whether each partition builds a local index, and of what type |
+
+`joinGridType` and `joinSpartitionDominantSide` are the two that address skew
+directly: `EQUALGRID` is the uniform grid that skew defeats, while `KDBTREE`
+and `QUADTREE` subdivide by actual data density, and the dominant side chooses
+whose density they follow.
+
 **Discussion points.**
 
 - Skew is the real risk: soil polygon density tracks survey detail and land
