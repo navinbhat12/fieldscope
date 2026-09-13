@@ -51,17 +51,33 @@ overlay per request.
 Two scopes. The pipeline is developed against a single county for fast
 iteration and run unchanged across the state.
 
+All figures below are measured.
+
 | | Tippecanoe County | Indiana |
 |---|---|---|
-| Land cover records | 2,079,440 *(measured)* | 104,126,688 *(measured)* |
-| Soil polygons | 30,264 *(measured)* | 1,341,119 *(measured)* |
-| Soil geometry on disk | 36.6 MB *(measured)* | ~1.6 GB *(projected)* |
-| Acquisition WFS tiles | 4 | 238 |
+| Land cover records | 2,079,440 | 104,126,688 |
+| Soil polygons (in scope) | 30,264 | 1,341,119 |
+| Soil polygons (as downloaded) | 30,264 | 1,482,366 |
+| Distinct soil map units | 429 | 7,245 |
+| Soil geometry on disk | 36.6 MB | 2.12 GB |
+| Acquisition WFS tiles | 4 | 196 of 238 |
+| Acquisition wall time | 23s | 1339s (22.3 min) |
 
 Indiana land cover was counted directly from the state raster (non-zero pixels
-of a 9143×15717 grid). The polygon count came from a Soil Data Access
-aggregate query, not an extrapolation — an earlier estimate of ~800k was low
-by 67%, which materially changes §5.5.
+of a 9143×15717 grid). An early estimate of ~800k soil polygons was low by
+67%, which materially changes §5.5.
+
+The two polygon counts differ because border tiles return soil from Illinois,
+Ohio, Kentucky and Michigan: 141,247 polygons, 9.5% of the download, that no
+Indiana land cover record can ever match. See §5.10.
+
+**An independent check on acquisition completeness.** The 1,341,119 figure was
+obtained twice by unrelated routes that agree exactly, to the polygon: once
+from a Soil Data Access SQL aggregate before any download began, and once by
+counting `areasymbol LIKE 'IN%'` in the assembled output of 196 WFS tiles. A
+gap in tile coverage would undercount and a deduplication error would shift
+the total in one direction or the other; neither happened, and all 92 county
+survey areas are present.
 
 ## 4. Architecture
 
@@ -264,19 +280,40 @@ spatial support — which is precisely what puts a SQLite-class edge database in
 play alongside PostGIS. The architectural choice cascades into the
 infrastructure choice.
 
-### 5.8 State-scale acquisition — OPEN
+### 5.8 State-scale acquisition
 
-**Status:** open
+**Status:** decided, implemented, run
 
 **Context.** SSURGO geometry is only reliably available via WFS in bounding-box
-tiles. Indiana's bbox is 238 tiles at 0.25°; observed county tiles took 16–82s
-each, implying a multi-hour job against a government service with no
+tiles. Indiana's bounding box is 238 tiles at 0.25°, against 4 for a county,
+and the first sequential estimate put it beyond an hour as a single
+uninterruptible request stream against a government service with no
 availability guarantee.
 
-**Requirements this implies.** Per-tile caching so a failure costs one tile
-rather than the run; idempotent re-invocation; retry with backoff; and
-deduplication across tile seams — already handled at county scale, where
-30,671 fetched features deduplicated to 30,264.
+**Decision.** Three changes, in order of effect:
+
+1. **Skip tiles that miss the area's real outline.** The bounding box is a
+   rectangle and Indiana is not: 42 of 238 tiles fall entirely in neighbouring
+   states and are never requested.
+2. **Fetch through a four-worker pool.** The bound is politeness toward a
+   public federal service, not client throughput.
+3. **Cache each tile to disk as it lands,** keyed by position in the full
+   bounding box so the cache stays valid across differently-scoped runs. This
+   is what makes a twenty-minute download safe to interrupt: a run that dies
+   at tile 180 resumes at 180.
+
+**Measured.** County output unchanged (30,671 → 30,264 polygons, 429 map
+units, identical bounds) at 23s rather than 82s. Indiana: 196 tiles in 1339s
+(22.3 min) at 7.2s a tile, 1,522,662 polygons deduplicating to 1,482,366,
+2.12 GB.
+
+**On estimating this.** A ten-tile pilot, sampled at a stride across the state
+rather than as a contiguous block, projected 19 minutes against the 22.3
+actually taken — close enough to have been worth the three minutes it cost.
+The earlier "over an hour" figure came from extrapolating four tiles of one
+unusually polygon-dense farmland county, which is the same species of
+unmeasured extrapolation that had already put a wrong throughput number in the
+README. Pilot, then commit.
 
 ### 5.9 An honest drought layer in the demo — OPEN
 
@@ -302,6 +339,37 @@ specific past week is honest in a way that inventing values is not.
 **Consequence.** The serving store must key on the drought week, not assume a
 single current one — which is worth knowing before §5.6 fixes the key schema,
 not after.
+
+### 5.10 Out-of-state polygons in the state download — OPEN
+
+**Status:** open; cheap, but measure before assuming
+
+**Context.** WFS is queried by bounding box, and Indiana's bounding box
+overlaps four other states. 141,247 of the 1,482,366 polygons downloaded —
+9.5% — belong to Illinois, Ohio, Kentucky or Michigan survey areas.
+
+**Why it matters more than 9.5% sounds.** Under the broadcast strategy of §5.3
+this would be rounding error. Under the partitioned join of §5.5 every polygon
+is shuffled across the network and indexed within its partition, so the
+fraction is paid in shuffle volume and index build time, not just memory.
+
+**Options.**
+
+1. Keep them. No filter step, and the pipeline stays correct if the AOI ever
+   becomes multi-state.
+2. Filter on `areasymbol LIKE 'IN%'` before the join.
+
+**Leaning.** Option 2 — one predicate that removes work which almost certainly
+cannot produce output, since the land cover raster is clipped to Indiana and
+SSURGO survey areas follow county and state lines rather than crossing them.
+
+**What to check first.** "Almost certainly" is doing real work in that
+sentence. Survey area boundaries are *administratively* aligned to state lines,
+but the two datasets are independently produced, so a border pixel could
+legitimately fall inside a neighbouring state's polygon where the two
+representations disagree by a few metres. The filter should be validated by
+running the join both ways on a border county and diffing the matched counts,
+not adopted because the reasoning sounds right.
 
 ---
 
@@ -336,7 +404,8 @@ repository cites that, the sample size, and the hardware.
 |---|---|---|
 | 1 | Reproducible acquisition of four public datasets | done |
 | 2 | Distributed join, validated against single-machine truth | done |
-| 3 | State-scale join strategy (§5.5) + Indiana run | next |
+| 3a | Indiana SSURGO acquisition (§5.8) | done |
+| 3b | State-scale join strategy (§5.5) + Indiana run | next |
 | 4 | Serving key design (§5.6) and store (§5.7) | open |
 | 5 | Edge API + measured multi-region latency | open |
 | 6 | Map frontend, public demo — needs §5.9 first | open |
