@@ -190,12 +190,18 @@ update path.
 
 ### 5.5 Join strategy at state scale — grid chunking
 
-**Status:** decided and implemented; verified on county data, not yet run at
-state scale (see §9)
+**Status:** decided, implemented, and run at state scale on 2026-09-14 (§9)
 
-**Context.** Indiana has 1,341,119 soil polygons against 104,126,688 land
+**Context.** Indiana has 1,482,366 soil polygons against 104,126,688 land
 cover records, in 2.12 GB of geometry. The broadcast strategy of §5.3 cannot
 survive this.
+
+> The polygon count here previously read 1,341,119. The figure the pipeline
+> actually reads from `data/raw/ssurgo_indiana.parquet` is 1,482,366, and that
+> is the number every run has used. The smaller one is most likely a
+> pre-§5.10 count taken before out-of-state polygons were kept, but that has
+> not been confirmed. The per-block arithmetic below is recomputed at the
+> larger figure, which is the conservative direction.
 
 **Measured, not assumed.** `scripts/broadcast_limit.py` holds the point side
 fixed at 2,000,000 and scales only the polygon side, so the single variable is
@@ -268,11 +274,15 @@ a polygon only ever matches points already inside that block.
 | Matched | 1,875,956 | 1,875,956 | **1,875,956** |
 | Match rate | 90.21% | 90.21% | **90.21%** |
 | Output rows | 5,349 | 5,349 | **5,349** |
-| Throughput | ~100k rec/s | ~900 rec/s | **93,706 rec/s** |
+| Throughput | ~100k rec/s | ~900 rec/s | **138,559 rec/s** |
 
 All three agree exactly, and `validate_join.py` passes against the
 single-machine ground truth on the chunked output, including the known
 one-pixel artifact on mukey 164315.
+
+The chunked throughput read 93,706 rec/s until the rewrite described below
+removed a per-block cache-and-count pass; 138,559 is the same measurement
+(Tippecanoe, 3x3, 6 cores) taken after it, and the output is byte-identical.
 
 **Discussion points.**
 
@@ -284,6 +294,61 @@ one-pixel artifact on mukey 164315.
   known-good answer on county data before being pointed at the state.
 - Overlapping partitions are a correctness bug, not a performance one, which is
   why counties were rejected as the chunk unit despite being the obvious choice.
+
+**What state scale added.** The county verification above was correct and
+still is, but it could not exercise the failures that actually blocked the
+state run. Three defects surfaced only above roughly 250,000 polygons, and all
+three were about memory rather than correctness:
+
+1. **`--chunks` did not imply broadcast.** The strategy is chosen before the
+   session exists, because Sedona reads it from Spark configuration rather
+   than per query. Auto-selection saw 1,482,366 polygons, picked
+   `partitioned`, and pinned `autoBroadcastJoinThreshold=-1` onto the session,
+   so every per-block `F.broadcast()` was silently ignored and each block took
+   the ~900 rec/s path chunking exists to avoid. The county never hit this:
+   30,264 polygons is under the ceiling, so `auto` picks `broadcast` and the
+   config is never set.
+2. **The soil geometry was cached twice.** `run_chunked` derives `boxed` from
+   `soils` and never reads `soils` again, but both stayed cached — two copies
+   of ~2 GB of geometry in an 8 GB heap. The first state attempt died of heap
+   exhaustion on block 37 of 64, the densest central block.
+3. **Memory grew with the block count.** Each block's aggregate was cached and
+   appended, then unioned only at the end, so storage memory rose on every
+   block and squeezed execution memory further each time. This is the
+   instructive one, because it does not look like a memory bug from the
+   outside: identical 998k-point blocks ran 7s, 8s, 13s, 29s, 60s and the run
+   degraded smoothly rather than failing anywhere in particular. Blocks are
+   now rolled up in the driver as they land — the aggregates are tiny, 5,349
+   rows for the whole county — and Spark retains nothing across blocks.
+
+That third change was the first operation in the pipeline to need a Python
+worker, every prior one being a JVM-side Sedona expression, which exposed a
+fourth latent problem: `PYSPARK_PYTHON` was unset, so workers launched on the
+system Python 3.9 against a 3.11 driver and Spark refuses to run across minor
+versions. `spark_session.build()` now points both it and
+`PYSPARK_DRIVER_PYTHON` at `sys.executable`.
+
+**The limit of the equal-grid assumption.** Grid chunking assumes blocks are
+roughly equal work, and one block of 144 violated that badly. Measured on the
+completed run:
+
+| block | wall time |
+|---|---|
+| 91 | 18s |
+| **92** | **1,986s** |
+| 93 | 58s |
+| 94-100 | 2-11s each |
+
+Block 92 took 33 minutes against 2-11s for its neighbours — roughly 400x — and
+then the run recovered completely, which rules out the progressive-degradation
+bugs above. It was not GC: `jstat` during the stall showed ~4% of CPU in
+collection, with concurrent GC keeping up, so the JVM was doing genuine work at
+a very high allocation rate. It dominated the total: 4,103s of join time, of
+which one block was 1,986s. Without it the run would be ~35 minutes rather than
+~69. The cause is not yet established — the likely candidate is that block's
+bbox filter selecting far more polygons, or far more complex geometry, than a
+typical block. A grid that equalises *points* does not equalise *polygons*, and
+nothing currently measures the latter per block.
 
 ### 5.6 Serving key design — OPEN
 
@@ -310,7 +375,8 @@ I just drew," which is not the same lookup.
 - Cell size is the central knob: finer cells mean better spatial fidelity and
   more rows. Row count ≈ cells × distinct (soil, cover) combinations per cell,
   so a per-combination schema risks multiplying into millions of rows at state
-  scale. Storing one row per cell with the summary as a compact blob keeps the
+  scale. The pre-cell state figure is now measured at 155,025 rows (§5.7), so
+  the multiplier is what matters, not the base. Storing one row per cell with the summary as a compact blob keeps the
   table small and the lookup single-keyed.
 - The cell function must be computable in a Worker from lon/lat (see §5.2).
 - This is an accuracy-for-latency trade and needs a stated error budget, not
@@ -321,8 +387,12 @@ I just drew," which is not the same lookup.
 **Status:** open; decide once §5.6 fixes the row count
 
 **Context.** Deliberately deferred until the output size was known. County
-output is 5,349 rows, but §5.6 changes the shape, so the county figure does
-not settle it.
+output is 5,349 rows; **the Indiana output is 155,025 rows (1.3 MB Parquet,
+7,534 distinct map units)**, measured on the completed run of §9. §5.6 still
+changes the shape, so this does not settle the store on its own — but it does
+bound it: the current key produces a table small enough that every candidate
+store handles it comfortably, and the question becomes what §5.6's cell
+scheme multiplies it by.
 
 **Note.** Because §5.1 removed request-time geometry, the store does not need
 spatial support — which is precisely what puts a SQLite-class edge database in
@@ -475,7 +545,7 @@ repository cites that, the sample size, and the hardware.
 | 2 | Distributed join, validated against single-machine truth | done |
 | 3a | Indiana SSURGO acquisition (§5.8) | done |
 | 3b | State-scale join strategy (§5.5) | done — verified on county data |
-| 3c | The Indiana run itself | **next — see §9** |
+| 3c | The Indiana run itself | done — 2026-09-14, see §9 |
 | 4 | Serving key design (§5.6) and store (§5.7) | open |
 | 5 | Edge API + measured multi-region latency | open |
 | 6 | Map frontend, public demo — needs §5.9 first | open |
@@ -488,68 +558,85 @@ serving work rather than after it.
 
 ---
 
-## 9. Next action: run the Indiana join
+## 9. The Indiana run
 
-Everything this needs is already on disk and committed. Nothing below requires
-re-downloading anything.
+**Status:** run and validated, 2026-09-14.
 
 ### The command
 
 ```bash
-.venv/bin/python -u scripts/run_join.py --aoi indiana --chunks 8 --cores 6 \
-  > indiana.log 2>&1
+.venv/bin/python -u scripts/run_join.py --aoi indiana --strategy broadcast \
+  --chunks 12 --cores 6 > indiana.log 2>&1
 ```
 
-- `--chunks 8` is an 8×8 = 64-block grid, putting roughly 23,000 polygons in
-  each block — comfortably under the 250,000 broadcast ceiling of §5.5.
-- `--cores 6` leaves 4 of 10 cores free so the machine stays usable. Drop the
-  flag to use all 10 and finish faster.
-- `-u` and the redirect matter: Python block-buffers to a file, so without
-  `-u` the log stays empty while the job runs.
+`--strategy broadcast` is **required**, not optional. Without it, auto-selection
+sees 1,482,366 polygons, picks `partitioned`, and pins
+`autoBroadcastJoinThreshold=-1` onto the session, which silently disables the
+per-block broadcast that chunking depends on — see §5.5. The earlier version of
+this section omitted the flag and would have run at roughly 900 records/sec.
 
-Watch it with `tail -f indiana.log`. Each block prints a line as it lands, so
-progress is visible immediately and stalls are obvious.
+`--chunks 12` is a 12x12 = 144-block grid. Six blocks are empty, falling outside
+the state on the bbox corners. The 8 GB driver default is correct; an attempt at
+`--memory 10g` pushed a 16 GB machine into swap and made things worse.
 
-### What to expect
+### Measured result
 
-Projected from the measured 93,706 records/sec at 6 cores: **20–25 minutes**
-for 104,126,688 records, plus per-block overhead. This is a projection, not a
-measurement — the first few block lines will give the real rate, and the run
-can be killed and restarted cheaply if the rate looks wrong.
+| | |
+|---|---|
+| Land cover records | 104,126,688 |
+| Soil polygons | 1,482,366 |
+| Matched | 104,125,537 (99.9989%) |
+| Unmatched | 1,151 |
+| Output rows | 155,025 |
+| Distinct map units | 7,534 |
+| Output size | 1.3 MB Parquet |
+| Join wall time | 4,103s |
+| Total pipeline | 4,146s (69 min) |
+| Throughput | 25,377 rec/s |
 
-### How to know it worked
+The throughput figure is honest but not representative: one block took 1,986s
+of the 4,103s (§5.5). The other 137 non-empty blocks averaged well under 10
+seconds, and the same code measures 138,559 rec/s on the county.
 
-1. **`matched records` should be close to 104,126,688** and the match rate
-   high. See the open question below before treating an exact 100.00% as good
-   news.
-2. **`precomputed rows`** is the number §5.6 and §5.7 have been waiting for —
-   it determines the serving key design and the storage choice. County was
-   5,349; the state figure is the one that matters.
-3. **Sanity check the land cover totals** printed at the end. Corn and
-   soybeans should dominate, at roughly 47% combined statewide (measured from
-   the raster directly: corn 23.69%, soybeans 22.93%). A wildly different mix
-   means something is wrong regardless of what the counts say.
-4. `scripts/validate_join.py` validates the *county* output only. It has no
-   Indiana ground truth to compare against, so it is not a check on this run.
+**Sanity check passed exactly.** Corn 23.69% and soybeans 22.93% of 23,156,980
+acres, against the 23.69% / 22.93% measured independently from the raster
+before the join was written. Total acreage matches Indiana's land area, and the
+output has no nulls.
 
-### Two open questions this run should settle
+### The 100% match rate — resolved
 
-**The 100.00% match rate.** A 50,000-point Indiana sample matched 49,838 of
-49,838 — exactly 100%, where the county gets 90.21%. That is either real or a
-bug, and it has not been checked.
+The open question was whether Indiana's ~100% match rate was real or a bug,
+where Tippecanoe matches only 90.21%. **It is real, and the README's
+explanation of the county figure is wrong.**
 
-The plausible innocent explanation: Tippecanoe's raster footprint extends
-past the bounding box its soil tiles were requested for, on all four sides, so
-points in that margin had no polygon available to match — an artifact of the
-download extent rather than a fact about the ground. Indiana fetched all 196
-tiles covering its full bounding box, leaving no such margin.
+The evidence is in the output itself. The README attributes the county's
+unmatched 9.8% to "open water and unsurveyed land". If that were the mechanism,
+Indiana could not match 99.9989%, because Indiana contains plenty of open
+water — and in fact **268,118 acres of open water appear in the overlay across
+5,406 rows**, meaning those pixels *did* match soil polygons. SSURGO maps water
+as map units of its own; water is surveyed, not absent. So unmatched cannot
+mean water.
 
-**If that explanation holds, the README is wrong.** It currently states that
-the unmatched 9.8% in Tippecanoe is "open water and unsurveyed land", and
-presents the agreement between two independently computed figures as
-confirmation. That claim needs re-checking, because it is presented as a
-correctness result and may be an artifact.
+What remains is the download-extent explanation: Tippecanoe's raster footprint
+extends past the bounding box its soil tiles were requested for, so points in
+that margin had no polygon available to match. Indiana fetched all 196 tiles
+covering its full bounding box, leaving almost no such margin — and the 1,151
+points that still miss are consistent with a thin edge effect at the state
+border, not with a property of the ground.
 
-To check: take the unmatched Tippecanoe points and see whether they sit in the
-margin outside the soil tile bounding box, or are scattered over water and
-genuinely unsurveyed ground. The answer changes what the README should say.
+**This makes the county's 90.21% an artifact of acquisition, not a measurement
+of anything.** The README currently presents it as a correctness result, with
+the agreement of two independently computed figures offered as confirmation;
+both figures can agree and still describe the same artifact. The claim carries
+an "under review" note and now needs rewriting.
+
+### Next actions
+
+1. **Fix the README's 9.8% claim** — see above. It is public-facing copy that
+   states something the data contradicts, which is the one kind of error this
+   project cannot afford.
+2. **Diagnose block 92** (§5.5). Measuring polygons-per-block is cheap and
+   would confirm or kill the bbox-density hypothesis; the fix, if confirmed, is
+   probably to split blocks on polygon count rather than on area.
+3. **§5.6 and §5.7 are now unblocked** — the row count they were waiting for is
+   155,025.
