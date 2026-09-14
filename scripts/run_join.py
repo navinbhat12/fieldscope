@@ -139,8 +139,23 @@ def run_chunked(spark, points_src, soils, n_chunks: int, cores: int):
     ).cache()
     boxed.count()
 
+    # boxed carries every column the blocks need, so the original cached copy
+    # is dead weight from here on. Holding both meant two copies of ~2 GB of
+    # geometry pinned in the heap, which left the dense central blocks no
+    # execution memory and exhausted it outright at 8 GB.
+    soils.unpersist()
+
     t0 = time.time()
-    parts, matched, done = [], 0, 0
+    # Blocks are rolled up in the driver as they land, rather than each block's
+    # result being cached in Spark and unioned at the end. A cached DataFrame
+    # per block accumulates in storage memory and steals a little more
+    # execution memory on every block, so the run degrades smoothly and then
+    # dies -- measured at 7s per block early and 60s for identical work by
+    # block 92. The aggregates are tiny (the whole county output was 5,349
+    # rows), so a plain dict holds every block at negligible cost and Spark
+    # carries no growing state at all.
+    totals: dict[tuple, int] = {}
+    out_schema, matched, done = None, 0, 0
 
     for i in range(n_chunks):
         for j in range(n_chunks):
@@ -170,26 +185,35 @@ def run_chunked(spark, points_src, soils, n_chunks: int, cores: int):
                 pts.join(F.broadcast(blk_soils), F.expr("ST_Contains(geom, pt)"), "inner")
                 .groupBy("mukey", "musym", "areasymbol", "crop_code", "drought_class")
                 .agg(F.count(F.lit(1)).alias("pixels"))
-            ).cache()
-            n_hit = agg.agg(F.sum("pixels")).first()[0] or 0
+            )
+            # One action per block, and nothing is retained on the Spark side.
+            # The schema is captured from the first block that produces rows so
+            # the final frame keeps the exact column types the join produced.
+            rows = agg.collect()
+            if out_schema is None and rows:
+                out_schema = agg.schema
 
-            parts.append(agg)
+            n_hit = 0
+            for r in rows:
+                key = (r.mukey, r.musym, r.areasymbol, r.crop_code, r.drought_class)
+                totals[key] = totals.get(key, 0) + r.pixels
+                n_hit += r.pixels
+
             matched += n_hit
             log(f"  block {done}/{n_chunks ** 2}: {n_pts:>9,} pts -> {n_hit:>9,} matched "
                 f"[{time.time() - t0:.0f}s]")
 
     secs = time.time() - t0
-    if not parts:
+    if not totals:
         raise SystemExit("no block produced any matches")
 
     # The same soil-unit/crop combination appears in every block it spans, so
-    # the per-block counts have to be summed rather than concatenated.
-    union = parts[0]
-    for p in parts[1:]:
-        union = union.unionByName(p)
-    rolled = union.groupBy(
-        "mukey", "musym", "areasymbol", "crop_code", "drought_class"
-    ).agg(F.sum("pixels").alias("pixels"))
+    # the per-block counts are summed rather than concatenated -- done above by
+    # keying the dict on the group, which is the same roll-up the old union
+    # performed, just carried out as each block arrives.
+    rolled = spark.createDataFrame(
+        [(*key, pixels) for key, pixels in totals.items()], out_schema
+    )
 
     return rolled, matched, secs
 
@@ -212,6 +236,11 @@ def main() -> None:
     # is also someone's desktop.
     ap.add_argument("--cores", type=int, default=None,
                     help="limit Spark to this many cores (default: all)")
+    # The 8 GB default is sized for county work. A state run caches far more
+    # geometry and needs headroom, but the driver heap has to stay well under
+    # physical RAM -- everything here runs in one JVM on a laptop.
+    ap.add_argument("--memory", default="8g", metavar="SIZE",
+                    help="driver heap, e.g. 10g (default: 8g)")
     # Chunked mode grids the area into N x N blocks and runs an independent
     # broadcast join per block. See run_chunked() for why this beats Sedona's
     # own partitioned join by roughly two orders of magnitude here.
@@ -236,6 +265,7 @@ def main() -> None:
     spark = build(
         app_name=f"fieldscope-join-{aoi.slug}",
         local_threads=str(args.cores) if args.cores else "*",
+        memory=args.memory,
         conf=PARTITIONED_CONF if strategy == "partitioned" else None,
     )
     cores = spark.sparkContext.defaultParallelism

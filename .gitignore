@@ -34,3 +34,6 @@ dist/
 
 # Local Claude Code config. Stays local.
 CLAUDE.md
+
+# Run logs from long jobs; regenerate by rerunning the job.
+*.log

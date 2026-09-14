@@ -8,6 +8,7 @@ is why the runtime is pinned in pyproject.toml.
 """
 
 import os
+import sys
 
 from sedona.spark import SedonaContext
 
@@ -38,6 +39,14 @@ def build(
     Scaling out means changing the master URL, not the job.
     """
     os.environ.setdefault("JAVA_HOME", "/opt/homebrew/opt/openjdk@17")
+
+    # Spark launches Python workers with whatever `python3` is on PATH, which
+    # is the system 3.9 here rather than the venv's 3.11, and it refuses to run
+    # across minor versions. Nothing needed a worker while every operation was
+    # a JVM-side Sedona expression, so this stayed invisible until the first
+    # one did -- point both at the interpreter actually running this process.
+    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
+    os.environ.setdefault("PYSPARK_DRIVER_PYTHON", sys.executable)
 
     builder = (
         SedonaContext.builder()
