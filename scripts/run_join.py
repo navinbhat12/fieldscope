@@ -37,17 +37,50 @@ already native to it, and area is expressible in real units, which degrees
 cannot do.
 """
 
+import argparse
 import sys
 import time
 from pathlib import Path
 
+import pyarrow.parquet as pq
 from pyspark.sql import functions as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from fieldscope.cdl_classes import CDL_CLASSES, NON_AGRICULTURAL
-from fieldscope.config import DEFAULT_AOI, EQUAL_AREA, INTERIM, PROCESSED, RAW, WGS84
+from fieldscope.config import (
+    AOIS,
+    DEFAULT_AOI,
+    EQUAL_AREA,
+    INTERIM,
+    PROCESSED,
+    RAW,
+    WGS84,
+    resolve_aoi,
+)
 from fieldscope.spark_session import build
+
+# Measured in scripts/broadcast_limit.py: broadcasting the polygon side works
+# at 300,000 polygons and dies at 600,000 with heap exhaustion on an 8 GB
+# driver. The threshold is set below the observed floor rather than between
+# the two rungs, because the failure is abrupt and the cost of choosing the
+# partitioned strategy unnecessarily is a slower run, not a dead one.
+BROADCAST_MAX_POLYGONS = 250_000
+
+# Settings that switch Sedona from a broadcast join to a spatially-partitioned
+# one. Both sides get partitioned onto a shared KDB-tree grid and each
+# partition joins locally, so nothing has to fit in the driver.
+#
+# KDBTREE over EQUALGRID because soil polygon density tracks land use and
+# survey detail: a uniform grid would put most of the state's geometry in a
+# handful of partitions and leave the rest idle, which is the whole problem
+# a partitioned join is supposed to solve.
+PARTITIONED_CONF = {
+    "sedona.join.autoBroadcastJoinThreshold": "-1",  # never broadcast
+    "sedona.join.gridtype": "kdbtree",
+    "sedona.global.index": "true",
+    "sedona.global.indextype": "rtree",
+}
 
 PIXEL_M2 = 30.0 * 30.0
 ACRES_PER_PIXEL = PIXEL_M2 / 4046.8564224
@@ -64,19 +97,151 @@ def stage(label: str) -> None:
     print(f"\n{'-' * 68}\n{label}\n{'-' * 68}", flush=True)
 
 
+def run_chunked(spark, points_src, soils, n_chunks: int, cores: int):
+    """Join block by block, so every block can use the fast broadcast path.
+
+    Sedona's own partitioned join works and is correct -- verified against the
+    broadcast result on county data -- but it was measured at roughly 900
+    records/sec on Indiana, which puts the state run past thirty hours. The
+    cost is in shuffling 2 GB of geometry and rebuilding indexes per partition.
+
+    Chunking replaces that with a partition function the data already suggests.
+    Each block holds few enough polygons to broadcast, so every block runs the
+    ~100,000 records/sec path instead, and no geometry is shuffled at all --
+    the polygon subset is small enough to send whole.
+
+    Blocks are a regular grid rather than counties because county bounding
+    boxes overlap, and a point inside two of them would be counted twice,
+    silently inflating every acreage in the output. A grid partitions the
+    plane exactly: each point's block is arithmetic on its coordinates, so
+    double counting is impossible by construction. Polygons straddling a
+    boundary go to both blocks, which is harmless -- a polygon only ever
+    matches points that are themselves in that block.
+
+    Returns (aggregated overlay rows, total matched, seconds spent joining).
+    """
+    bounds = points_src.agg(
+        F.min("x").alias("x0"), F.max("x").alias("x1"),
+        F.min("y").alias("y0"), F.max("y").alias("y1"),
+    ).first()
+    span_x = (bounds.x1 - bounds.x0) / n_chunks
+    span_y = (bounds.y1 - bounds.y0) / n_chunks
+    log(f"grid: {n_chunks}x{n_chunks} = {n_chunks ** 2} blocks, "
+        f"{span_x / 1000:.0f} x {span_y / 1000:.0f} km each")
+
+    # Polygon bounding boxes, computed once. Selecting a block's polygons is
+    # then a numeric filter rather than a geometric one, which matters because
+    # it happens once per block.
+    boxed = soils.selectExpr(
+        "geom", "mukey", "musym", "areasymbol", "drought_class",
+        "ST_XMin(geom) AS bx0", "ST_XMax(geom) AS bx1",
+        "ST_YMin(geom) AS by0", "ST_YMax(geom) AS by1",
+    ).cache()
+    boxed.count()
+
+    t0 = time.time()
+    parts, matched, done = [], 0, 0
+
+    for i in range(n_chunks):
+        for j in range(n_chunks):
+            x0 = bounds.x0 + i * span_x
+            x1 = x0 + span_x if i < n_chunks - 1 else bounds.x1 + 1
+            y0 = bounds.y0 + j * span_y
+            y1 = y0 + span_y if j < n_chunks - 1 else bounds.y1 + 1
+
+            blk_pts = points_src.filter(
+                (F.col("x") >= x0) & (F.col("x") < x1)
+                & (F.col("y") >= y0) & (F.col("y") < y1)
+            )
+            n_pts = blk_pts.count()
+            done += 1
+            if not n_pts:
+                continue
+
+            blk_soils = boxed.filter(
+                (F.col("bx0") <= x1) & (F.col("bx1") >= x0)
+                & (F.col("by0") <= y1) & (F.col("by1") >= y0)
+            ).select("geom", "mukey", "musym", "areasymbol", "drought_class")
+
+            pts = blk_pts.repartition(cores * 2).selectExpr(
+                "ST_Point(CAST(x AS DOUBLE), CAST(y AS DOUBLE)) AS pt", "crop_code"
+            )
+            agg = (
+                pts.join(F.broadcast(blk_soils), F.expr("ST_Contains(geom, pt)"), "inner")
+                .groupBy("mukey", "musym", "areasymbol", "crop_code", "drought_class")
+                .agg(F.count(F.lit(1)).alias("pixels"))
+            ).cache()
+            n_hit = agg.agg(F.sum("pixels")).first()[0] or 0
+
+            parts.append(agg)
+            matched += n_hit
+            log(f"  block {done}/{n_chunks ** 2}: {n_pts:>9,} pts -> {n_hit:>9,} matched "
+                f"[{time.time() - t0:.0f}s]")
+
+    secs = time.time() - t0
+    if not parts:
+        raise SystemExit("no block produced any matches")
+
+    # The same soil-unit/crop combination appears in every block it spans, so
+    # the per-block counts have to be summed rather than concatenated.
+    union = parts[0]
+    for p in parts[1:]:
+        union = union.unionByName(p)
+    rolled = union.groupBy(
+        "mukey", "musym", "areasymbol", "crop_code", "drought_class"
+    ).agg(F.sum("pixels").alias("pixels"))
+
+    return rolled, matched, secs
+
+
 def main() -> None:
+    ap = argparse.ArgumentParser()
     # --limit N runs the whole pipeline over a sample of the land cover
     # records. Every scale-up starts here: a sample that finishes in seconds
     # proves the design before any full run is worth starting, and its
     # throughput predicts the full run's wall time.
-    limit = None
-    if "--limit" in sys.argv:
-        limit = int(sys.argv[sys.argv.index("--limit") + 1])
+    ap.add_argument("--limit", type=int, default=None,
+                    help="run over a random sample of this many land cover records")
+    ap.add_argument("--aoi", choices=sorted(AOIS), default=None,
+                    help=f"override DEFAULT_AOI ({DEFAULT_AOI.slug}) for this run only")
+    ap.add_argument("--strategy", choices=("auto", "broadcast", "partitioned"), default="auto",
+                    help="join strategy; auto picks from the polygon count")
+    # Spark takes every core by default, which pins the machine for the length
+    # of the run. Capping it leaves the machine usable at the cost of wall
+    # time -- worth it for a job measured in tens of minutes on a laptop that
+    # is also someone's desktop.
+    ap.add_argument("--cores", type=int, default=None,
+                    help="limit Spark to this many cores (default: all)")
+    # Chunked mode grids the area into N x N blocks and runs an independent
+    # broadcast join per block. See run_chunked() for why this beats Sedona's
+    # own partitioned join by roughly two orders of magnitude here.
+    ap.add_argument("--chunks", type=int, default=None, metavar="N",
+                    help="split the area into an N x N grid and join each block separately")
+    args = ap.parse_args()
 
-    aoi = DEFAULT_AOI
-    spark = build(app_name=f"fieldscope-join-{aoi.slug}")
+    limit = args.limit
+    aoi = resolve_aoi(args.aoi)
+
+    # The strategy has to be chosen before the session starts, because it is
+    # set through Spark configuration rather than per-query. So the polygon
+    # count is read from Parquet metadata first -- cheap, no session needed.
+    n_polygons = pq.ParquetFile(RAW / f"ssurgo_{aoi.slug}.parquet").metadata.num_rows
+    if args.strategy == "auto":
+        strategy = "broadcast" if n_polygons <= BROADCAST_MAX_POLYGONS else "partitioned"
+        why = f"{n_polygons:,} polygons vs a measured ceiling of {BROADCAST_MAX_POLYGONS:,}"
+    else:
+        strategy = args.strategy
+        why = "forced with --strategy"
+
+    spark = build(
+        app_name=f"fieldscope-join-{aoi.slug}",
+        local_threads=str(args.cores) if args.cores else "*",
+        conf=PARTITIONED_CONF if strategy == "partitioned" else None,
+    )
     cores = spark.sparkContext.defaultParallelism
     log(f"Spark {spark.version}, master {spark.sparkContext.master}, {cores} cores")
+    log(f"AOI: {aoi.name}")
+    log(f"join strategy: {strategy.upper()} ({why})")
 
     t_start = time.time()
 
@@ -165,31 +330,57 @@ def main() -> None:
     src = spark.read.parquet(str(INTERIM / f"cdl_points_{aoi.slug}"))
     if sample_fraction:
         src = src.sample(withReplacement=False, fraction=sample_fraction, seed=42)
-    points = src.repartition(cores * 2).selectExpr(
-        "ST_Point(CAST(x AS DOUBLE), CAST(y AS DOUBLE)) AS pt", "crop_code"
-    )
 
-    # F.broadcast forces the R-tree onto the polygon side. Without it Sedona
-    # indexes the points, which is both slower to build and single-threaded.
-    joined = points.join(
-        F.broadcast(soils),
-        F.expr("ST_Contains(geom, pt)"),
-        "inner",
-    ).select("crop_code", "mukey", "musym", "areasymbol", "drought_class")
+    if args.chunks:
+        pre_agg, n_joined, join_secs = run_chunked(spark, src, soils, args.chunks, cores)
+        log(f"matched records: {n_joined:,}")
+        log(f"match rate:      {100 * n_joined / n_points:.2f}% of land cover records")
+        log(f"join wall time:  {join_secs:.1f}s")
+        log(f"throughput:      {n_points / join_secs:,.0f} records/sec")
+    else:
+        pre_agg = None
+        points = src.repartition(cores * 2).selectExpr(
+            "ST_Point(CAST(x AS DOUBLE), CAST(y AS DOUBLE)) AS pt", "crop_code"
+        )
 
-    plan = joined._jdf.queryExecution().executedPlan().toString()
-    indexed_side = "polygons" if "SpatialIndex geom" in plan else "points (SLOW)"
-    log(f"R-tree built over: {indexed_side}")
+        # Under BROADCAST, F.broadcast forces the R-tree onto the polygon side.
+        # Without it Sedona indexes the points, which is both slower to build and
+        # single-threaded. Under PARTITIONED there is no small side to broadcast:
+        # both sides are shuffled onto a shared KDB-tree grid and each partition
+        # joins locally against its own index, so the hint must be absent or
+        # Spark will try to broadcast anyway and exhaust the driver.
+        right = F.broadcast(soils) if strategy == "broadcast" else soils
+        joined = points.join(
+            right,
+            F.expr("ST_Contains(geom, pt)"),
+            "inner",
+        ).select("crop_code", "mukey", "musym", "areasymbol", "drought_class")
 
-    t_join = time.time()
-    joined = joined.cache()
-    n_joined = joined.count()
-    join_secs = time.time() - t_join
+        # Verify the planner actually chose what was asked for. A strategy that
+        # silently falls back is the failure mode worth catching here: the job
+        # still returns correct answers, just by a route that will not scale.
+        plan = joined._jdf.queryExecution().executedPlan().toString()
+        if "BroadcastIndexJoin" in plan:
+            chosen = "BroadcastIndexJoin"
+        elif "RangeJoin" in plan:
+            chosen = "RangeJoin (spatially partitioned)"
+        else:
+            chosen = "UNKNOWN -- neither operator found in the plan"
+        log(f"physical operator: {chosen}")
+        if strategy == "partitioned" and "BroadcastIndexJoin" in plan:
+            raise SystemExit("asked for a partitioned join and got a broadcast one -- check config")
+        if strategy == "broadcast" and "SpatialIndex geom" not in plan:
+            log("WARNING: R-tree is not on the polygon side, which is the slow arrangement")
 
-    log(f"matched records: {n_joined:,}")
-    log(f"match rate:      {100 * n_joined / n_points:.2f}% of land cover records")
-    log(f"join wall time:  {join_secs:.1f}s")
-    log(f"throughput:      {n_points / join_secs:,.0f} records/sec")
+        t_join = time.time()
+        joined = joined.cache()
+        n_joined = joined.count()
+        join_secs = time.time() - t_join
+
+        log(f"matched records: {n_joined:,}")
+        log(f"match rate:      {100 * n_joined / n_points:.2f}% of land cover records")
+        log(f"join wall time:  {join_secs:.1f}s")
+        log(f"throughput:      {n_points / join_secs:,.0f} records/sec")
 
     # ---------------------------------------------------- precomputed table
     stage("Aggregating to the serving table")
@@ -197,9 +388,15 @@ def main() -> None:
     code_name = F.create_map([F.lit(x) for kv in CDL_CLASSES.items() for x in kv])
     non_ag = F.array([F.lit(c) for c in sorted(NON_AGRICULTURAL)])
 
-    overlay = (
+    # Chunked mode already counted per block and summed across them, so it
+    # arrives pre-grouped; the single-join path still has raw matched rows.
+    counted = pre_agg if pre_agg is not None else (
         joined.groupBy("mukey", "musym", "areasymbol", "crop_code", "drought_class")
         .agg(F.count(F.lit(1)).alias("pixels"))
+    )
+
+    overlay = (
+        counted
         .withColumn("acres", F.round(F.col("pixels") * F.lit(ACRES_PER_PIXEL), 3))
         .withColumn("land_cover", code_name[F.col("crop_code").cast("int")])
         .withColumn("is_agricultural", ~F.array_contains(non_ag, F.col("crop_code").cast("int")))

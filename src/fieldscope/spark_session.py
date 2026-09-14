@@ -23,7 +23,12 @@ PACKAGES = ",".join(
 )
 
 
-def build(app_name: str = "fieldscope", local_threads: str = "*", memory: str = "8g"):
+def build(
+    app_name: str = "fieldscope",
+    local_threads: str = "*",
+    memory: str = "8g",
+    conf: dict[str, str] | None = None,
+):
     """Create a Sedona-enabled local Spark session.
 
     Runs local[*] deliberately. The pipeline is a batch job over a bounded
@@ -49,6 +54,12 @@ def build(app_name: str = "fieldscope", local_threads: str = "*", memory: str = 
         # Quieter shutdown; the local session logs noisily on stop otherwise.
         .config("spark.ui.showConsoleProgress", "false")
     )
+
+    # Join-strategy settings are passed in rather than fixed here, because the
+    # right strategy depends on how much geometry the job actually has -- see
+    # the strategy selection in scripts/run_join.py.
+    for key, value in (conf or {}).items():
+        builder = builder.config(key, value)
 
     spark = SedonaContext.create(builder.getOrCreate())
     spark.sparkContext.setLogLevel("WARN")
