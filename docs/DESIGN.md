@@ -188,9 +188,10 @@ polygon→drought mapping has to be recomputed, not the full per-pixel join.
 An approximation made for performance turned out to define the incremental
 update path.
 
-### 5.5 Join strategy at state scale — OPEN
+### 5.5 Join strategy at state scale — grid chunking
 
-**Status:** open; next milestone
+**Status:** decided and implemented; verified on county data, not yet run at
+state scale (see §9)
 
 **Context.** Indiana has 1,341,119 soil polygons against 104,126,688 land
 cover records, in 2.12 GB of geometry. The broadcast strategy of §5.3 cannot
@@ -222,42 +223,67 @@ and no driver size reaches 1.34M polygons on a 17 GB machine.
 
 **Options.**
 
-1. **Spatially-partitioned join.** Partition both sides onto a shared grid
-   (KDB-tree or quadtree), join each partition locally, no broadcast.
-2. **Partition by county, union the results.** Trivially parallel, but it is
-   really 92 independent jobs rather than one distributed one, and polygons
-   crossing county lines need deduplication.
+1. **Sedona's spatially-partitioned join** (`RangeJoinExec`). Partition both
+   sides onto a shared KDB-tree grid, join each partition locally, no
+   broadcast. Selected by setting `sedona.join.autoBroadcastJoinThreshold=-1`
+   and `sedona.join.gridtype=kdbtree`.
+2. **Grid chunking.** Cut the area into blocks and run an independent
+   broadcast join per block, so every block stays under the §5.3 ceiling.
 
-**Leaning.** Option 1. Option 2 sidesteps the actual problem rather than
-solving it.
+**Option 1 was tried first, and rejected on measurement.**
 
-**Mechanism.** Sedona ships both strategies as separate physical operators —
-`BroadcastIndexJoinExec`, which §5.3 currently forces, and `RangeJoinExec`,
-which spatially partitions both sides and joins each partition locally. So the
-work is selecting and tuning the second, not implementing it. The knobs that
-matter:
+It is *correct*: on county data it reproduced the broadcast result exactly —
+90,358 matched, 90.19%, 2,948 rows — which is the check that matters, since a
+join strategy that returns different answers is not a strategy. But it is far
+too slow here:
 
-| Setting | Role |
+| Points (Indiana, 1.48M polygons) | Result |
 |---|---|
-| `autoBroadcastJoinThreshold` | decides broadcast vs. partitioned; Indiana crosses it |
-| `joinGridType` | the partitioner: `KDBTREE`, `QUADTREE`, `EQUALGRID`, `ZORDER`, `QUADTREE_RTREE` |
-| `joinSpartitionDominantSide` | which side's distribution drives partition boundaries (`LEFT`/`RIGHT`/`NONE`) |
-| `fallbackPartitionNum` | partition count, trading parallelism against shuffle |
-| `useIndex` / `indexType` | whether each partition builds a local index, and of what type |
+| 50,000 | 410.7s — 121 records/sec |
+| 500,000 | unfinished at a 900s timeout |
+| county, 100k pts / 30k polys | 151s vs 3s for broadcast — **50× slower** |
 
-`joinGridType` and `joinSpartitionDominantSide` are the two that address skew
-directly: `EQUALGRID` is the uniform grid that skew defeats, while `KDBTREE`
-and `QUADTREE` subdivide by actual data density, and the dominant side chooses
-whose density they follow.
+The marginal rate works out near 900 records/sec, which puts Indiana's 104M
+records past **thirty hours**. Two things were visibly wrong: 2 GB of geometry
+is shuffled across the network and re-indexed per partition, and the KDB-tree
+partitioner did not balance the load — the Spark UI showed 15 of 16 tasks
+finished and idle while a single straggler held the stage open, which is
+exactly the skew this partitioner is supposed to prevent.
+
+**Decision: option 2.** Each block holds few enough polygons to broadcast, so
+every block takes the fast path and *no geometry is shuffled at all*.
+
+**Why a regular grid and not counties.** County bounding boxes overlap. A
+point inside two of them would be joined twice and counted twice, silently
+inflating every acreage in the output — a wrong answer that still looks
+plausible. A grid partitions the plane exactly: a point's block is arithmetic
+on its coordinates, so double counting is impossible by construction. Polygons
+straddling a block boundary are sent to both blocks, which is harmless, since
+a polygon only ever matches points already inside that block.
+
+**Measured** (Tippecanoe, 3×3 grid, 6 cores):
+
+| | Broadcast | Sedona partitioned | Grid chunked |
+|---|---|---|---|
+| Matched | 1,875,956 | 1,875,956 | **1,875,956** |
+| Match rate | 90.21% | 90.21% | **90.21%** |
+| Output rows | 5,349 | 5,349 | **5,349** |
+| Throughput | ~100k rec/s | ~900 rec/s | **93,706 rec/s** |
+
+All three agree exactly, and `validate_join.py` passes against the
+single-machine ground truth on the chunked output, including the known
+one-pixel artifact on mukey 164315.
 
 **Discussion points.**
 
-- Skew is the real risk: soil polygon density tracks survey detail and land
-  use, so a uniform grid will produce badly uneven partitions.
-- Partition count trades parallelism against shuffle cost; both sides must be
-  shuffled, unlike the broadcast case where only one moves.
-- The naive extrapolation (104M ÷ observed county throughput) is meaningless,
-  because it assumes a join strategy that will not run at this size.
+- The generic tool was the wrong tool, and only measurement showed it. Sedona's
+  partitioner is general-purpose; the grid exploits something known about this
+  problem — that land cover records are already uniformly distributed over a
+  raster — which a general partitioner cannot assume.
+- Correctness came before performance: the chunked path was verified against a
+  known-good answer on county data before being pointed at the state.
+- Overlapping partitions are a correctness bug, not a performance one, which is
+  why counties were rejected as the chunk unit despite being the obvious choice.
 
 ### 5.6 Serving key design — OPEN
 
@@ -448,7 +474,8 @@ repository cites that, the sample size, and the hardware.
 | 1 | Reproducible acquisition of four public datasets | done |
 | 2 | Distributed join, validated against single-machine truth | done |
 | 3a | Indiana SSURGO acquisition (§5.8) | done |
-| 3b | State-scale join strategy (§5.5) + Indiana run | next |
+| 3b | State-scale join strategy (§5.5) | done — verified on county data |
+| 3c | The Indiana run itself | **next — see §9** |
 | 4 | Serving key design (§5.6) and store (§5.7) | open |
 | 5 | Edge API + measured multi-region latency | open |
 | 6 | Map frontend, public demo — needs §5.9 first | open |
@@ -458,3 +485,71 @@ Milestone 3 is the load-bearing one: it is where the broadcast strategy of §5.3
 stops working and the join has to become genuinely distributed. It also settles
 the output size that §5.6 and §5.7 depend on, which is why it comes before the
 serving work rather than after it.
+
+---
+
+## 9. Next action: run the Indiana join
+
+Everything this needs is already on disk and committed. Nothing below requires
+re-downloading anything.
+
+### The command
+
+```bash
+.venv/bin/python -u scripts/run_join.py --aoi indiana --chunks 8 --cores 6 \
+  > indiana.log 2>&1
+```
+
+- `--chunks 8` is an 8×8 = 64-block grid, putting roughly 23,000 polygons in
+  each block — comfortably under the 250,000 broadcast ceiling of §5.5.
+- `--cores 6` leaves 4 of 10 cores free so the machine stays usable. Drop the
+  flag to use all 10 and finish faster.
+- `-u` and the redirect matter: Python block-buffers to a file, so without
+  `-u` the log stays empty while the job runs.
+
+Watch it with `tail -f indiana.log`. Each block prints a line as it lands, so
+progress is visible immediately and stalls are obvious.
+
+### What to expect
+
+Projected from the measured 93,706 records/sec at 6 cores: **20–25 minutes**
+for 104,126,688 records, plus per-block overhead. This is a projection, not a
+measurement — the first few block lines will give the real rate, and the run
+can be killed and restarted cheaply if the rate looks wrong.
+
+### How to know it worked
+
+1. **`matched records` should be close to 104,126,688** and the match rate
+   high. See the open question below before treating an exact 100.00% as good
+   news.
+2. **`precomputed rows`** is the number §5.6 and §5.7 have been waiting for —
+   it determines the serving key design and the storage choice. County was
+   5,349; the state figure is the one that matters.
+3. **Sanity check the land cover totals** printed at the end. Corn and
+   soybeans should dominate, at roughly 47% combined statewide (measured from
+   the raster directly: corn 23.69%, soybeans 22.93%). A wildly different mix
+   means something is wrong regardless of what the counts say.
+4. `scripts/validate_join.py` validates the *county* output only. It has no
+   Indiana ground truth to compare against, so it is not a check on this run.
+
+### Two open questions this run should settle
+
+**The 100.00% match rate.** A 50,000-point Indiana sample matched 49,838 of
+49,838 — exactly 100%, where the county gets 90.21%. That is either real or a
+bug, and it has not been checked.
+
+The plausible innocent explanation: Tippecanoe's raster footprint extends
+past the bounding box its soil tiles were requested for, on all four sides, so
+points in that margin had no polygon available to match — an artifact of the
+download extent rather than a fact about the ground. Indiana fetched all 196
+tiles covering its full bounding box, leaving no such margin.
+
+**If that explanation holds, the README is wrong.** It currently states that
+the unmatched 9.8% in Tippecanoe is "open water and unsurveyed land", and
+presents the agreement between two independently computed figures as
+confirmation. That claim needs re-checking, because it is presented as a
+correctness result and may be an artifact.
+
+To check: take the unmatched Tippecanoe points and see whether they sit in the
+margin outside the soil tile bounding box, or are scattered over water and
+genuinely unsurveyed ground. The answer changes what the README should say.

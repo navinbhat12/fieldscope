@@ -85,9 +85,16 @@ median of 11 runs, range 14.6–54.3s. That spread is JVM warmup and page cache
 state, not variation in the work — no single-run figure is quoted anywhere in
 this repository.
 
-The 90.2% match rate is not data loss — soil polygons cover 90.3% of the
-raster footprint, the remainder being open water and unsurveyed land. The two
-figures were computed independently and agree to within 0.1%.
+The 90.2% match rate is not data loss: soil polygons cover 90.3% of the raster
+footprint, and those two figures were computed independently and agree to
+within 0.1%.
+
+> **Under review.** The *explanation* for that 9.8% — open water and
+> unsurveyed land — is in doubt. A statewide sample matched 100.00% of
+> records, which suggests the county gap is instead an artifact of the soil
+> download covering a smaller extent than the raster. The numbers above are
+> measured and stand; the reason given for them may not. See
+> [docs/DESIGN.md §9](docs/DESIGN.md).
 
 ### Correctness
 
@@ -170,14 +177,33 @@ uv sync
 .venv/bin/python -u scripts/benchmark.py --runs 7      # median + range, not one run
 ```
 
+Every script takes `--aoi {tippecanoe,indiana}` to override the configured
+area for that run alone. The join additionally takes:
+
+```bash
+--chunks N    # split into an N x N grid, one broadcast join per block
+--cores N     # cap Spark's cores so a long run leaves the machine usable
+--strategy    # broadcast | partitioned | auto (auto picks from polygon count)
+--limit N     # random sample of N land cover records
+```
+
+Statewide, which needs the chunked path — see
+[docs/DESIGN.md §9](docs/DESIGN.md):
+
+```bash
+.venv/bin/python -u scripts/run_join.py --aoi indiana --chunks 8 --cores 6
+```
+
 `data/` is gitignored; everything in it rebuilds from the scripts above. The
 whole pipeline was reproduced from a clean machine after a hardware reimage,
 and every correctness figure — down to a known single-pixel edge artifact —
 came back identical.
 
-Switching from county to statewide is a one-line change to `DEFAULT_AOI` in
-`src/fieldscope/config.py`, but the join will not survive it as currently
-written; see [docs/DESIGN.md §5.5](docs/DESIGN.md).
+`DEFAULT_AOI` in `src/fieldscope/config.py` sets the area every script uses by
+default; `--aoi` overrides it per run. Statewide needs `--chunks`, because
+broadcasting 1.34M soil polygons exhausts the driver — the limit was measured
+at between 300,000 and 600,000 polygons, and the alternatives are compared in
+[docs/DESIGN.md §5.5](docs/DESIGN.md).
 
 ### Watching a long run
 
@@ -198,7 +224,9 @@ Three things that cost real debugging time, recorded so they cost it once:
 - [x] Data acquisition — all four sources scripted and verified
 - [x] Exploration and cross-layer validation
 - [x] Spark + Sedona distributed join, validated against single-machine truth
-- [ ] Scale-up run across Indiana
+- [x] Indiana inputs acquired — 104,126,688 land cover records, 1,341,119 soil polygons
+- [x] A join strategy that survives state scale, verified on county data
+- [ ] The Indiana run itself
 - [ ] Serving store
 - [ ] Edge API and latency benchmarking
 - [ ] Map frontend
