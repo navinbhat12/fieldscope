@@ -1,7 +1,7 @@
 [project]
 name = "fieldscope"
 version = "0.1.0"
-description = "Distributed overlay engine joining large public geographic datasets, served from the edge"
+description = "Distributed overlay engine joining large public geographic datasets, served from a precomputed lookup"
 requires-python = ">=3.11,<3.12"
 
 dependencies = [

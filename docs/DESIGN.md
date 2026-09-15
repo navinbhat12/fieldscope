@@ -819,3 +819,98 @@ The React frontend comes after §5.9, which is still open: Indiana has
 essentially no current drought, so the layer is truthful and empty and the demo
 looks broken. That decision shapes what the frontend renders, so it should be
 settled before the frontend is built — but it blocks none of steps 1-6.
+
+### Amendments made during the build — 2026-09-14
+
+Recorded here rather than by silently editing the steps above, because in each
+case the plan met something the plan did not know.
+
+**The soil Parquet is EPSG:4326, not EPSG:5070.** Step 2 above asserts 5070.
+It is wrong: `scripts/download_ssurgo.py` requests 4326 from the WFS and stores
+it that way, and `scripts/run_join.py:331` transforms to 5070 at join time
+rather than on disk. The loader therefore reprojects on load and the
+`soil_polygon` column is `geometry(MultiPolygon, 5070)`. This matters for more
+than tidiness: acres computed in 4326 are meaningless, and storing 5070 is what
+makes serving acres agree with batch acres by construction rather than by
+coincidence.
+
+**A third table, `mukey_area`.** `POST /area` weights each map unit's
+breakdown by the fraction of that unit the drawn polygon covers. The
+denominator is the unit's total area across every polygon of it in the state,
+and a map unit is not one shape but many scattered ones. Computing that per
+request means scanning all of a unit's geometry purely to divide by it, which
+is the exact shape of work the batch/serving split exists to move offline. It
+is 7,534 rows, built once at load.
+
+**Alembic dropped for now.** §5.11 lists it. There are three tables, one writer,
+and no data that cannot be regenerated from Parquet; the recovery for any
+schema change is drop-and-reload, which is precisely what migrations exist to
+avoid needing — so here they would be ceremony. The schema is versioned as
+plain DDL in `serving/schema.sql` and `serving/indexes.sql`, which keeps the
+deploy reproducible. **Revisit when a loaded VM exists** and reloading costs an
+hour of someone's evening rather than three minutes of a laptop's.
+
+**The PostGIS image is `imresamu/postgis`, not `postgis/postgis`.** Every tag of
+the official image is amd64-only. On an Apple Silicon development machine that
+means the database runs under QEMU emulation, which is ruinous for the one step
+that dominates the load. `imresamu/postgis:16-3.4` is the multi-arch build from
+the maintainer of the official docker-postgis images, same PostgreSQL 16 and
+PostGIS 3.4, and it runs natively both here and on the amd64 deploy target — so
+this is one image across both, not a local-only substitution. Rosetta was
+considered and is unnecessary: nothing in the stack is amd64-only any more.
+
+**`POST /area` returns an estimate, and says so in its own response.** The batch
+join collapsed pixel locations into per-map-unit totals (§5.1), so knowing a
+field covers 30% of a map unit, the API can only report 30% of that unit's land
+cover. That is exact only if land cover is distributed uniformly within the
+unit, which it is not. Recovering the true answer would mean putting the raster
+back in the request path — the entire thing this design exists to avoid. The
+limitation ships in the `method` field of every response rather than living
+only in this document, because a caller should not have to read a design doc to
+learn that a number is approximate.
+
+**A size cap on the drawn polygon.** `MAX_QUERY_ACRES`, default 100,000 —
+roughly 156 square miles, against about 80 acres for a large Indiana field. It
+is checked by a pre-flight query that reprojects and measures the polygon
+without touching a table, so an oversized request is rejected before the
+expensive spatial work rather than after it.
+
+**§5.9 is worse than "sparse".** `drought_class` across all 155,025 rows takes
+exactly two values: `-1` and `0`. There is no drought anywhere in the Indiana
+output — the layer is not thin, it is empty. Whatever §5.9 decides has no
+useful data to render in this AOI.
+
+### Planned: more than one state — requested 2026-09-14
+
+Indiana alone cannot demonstrate the product. It is uniformly humid corn-and-
+soy on deep glacial soils with **no drought at all** (§5.9), so two of the three
+datasets show their full range and the third shows nothing. Adding a small
+number of contrasting states is therefore a functional requirement, not
+coverage for its own sake.
+
+**Not before the Indiana vertical slice is serving.** This is recorded so the
+schema and the API stay state-agnostic while they are being written — which
+they now are: nothing in `serving/` hardcodes Indiana, and both loader inputs
+are selected by `--aoi`.
+
+**What each candidate would exercise**, and why the set should stay small:
+
+| State | Adds |
+|---|---|
+| Kansas or Nebraska | Recurrent drought — makes the USDM layer non-empty. Irrigated circles against dryland wheat. |
+| California (Central Valley) | Specialty crops (almonds, vines), heavy irrigation, and the country's most severe drought record. |
+| Arizona or New Mexico | Rangeland and desert — mostly non-agricultural land, which tests that `is_agricultural` means something. |
+| Mississippi or Arkansas | Delta soils, rice and cotton — a cropping system unlike the Midwest's. |
+
+**The binding constraint is storage, and it is already measurable.** Indiana's
+soil geometry alone is ~2.3 GB loaded, against 30 GB of Always Free disk
+(§5.11). California's SSURGO is substantially larger than Indiana's. Three or
+four states is plausible; the whole country is not, on this hosting. Two levers
+exist if it gets tight: `ST_Simplify` on the served geometry (cheap, costs some
+area precision), or storing soil geometry only for the states actually
+demoable. Decide with measured table sizes, not estimates.
+
+**A drought state changes the refresh story too.** §5.4's weekly USDM refresh is
+currently a cron job that changes nothing, because Indiana is never in drought.
+Against Kansas it becomes a visible, moving layer — which is a considerably
+better demonstration of why the pipeline reruns at all.
