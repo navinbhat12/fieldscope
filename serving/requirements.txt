@@ -1,0 +1,14 @@
+# Serving-tier dependencies. Deliberately separate from the batch pipeline's
+# pyproject.toml: that environment carries PySpark, Sedona and a JVM's worth of
+# assumptions, none of which belong in a container that answers HTTP requests.
+fastapi>=0.115
+uvicorn[standard]>=0.32
+pydantic>=2.9
+sqlalchemy>=2.0
+psycopg[binary]>=3.2
+redis>=5.1
+
+# Read by scripts/load_serving.py only. The loader runs inside this image
+# because it needs a Postgres driver and a Parquet reader in the same process,
+# and this is the one environment that has both.
+pyarrow>=17.0

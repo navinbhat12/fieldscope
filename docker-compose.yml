@@ -1,0 +1,85 @@
+# Serving tier for the precomputed overlay (docs/DESIGN.md §5.11).
+#
+# Three containers on one host, which is the whole deployment: the batch half
+# runs separately on Spark and hands this side a Parquet file. Resource limits
+# throughout are sized for the deploy target -- a GCP e2-micro with ~1 GB of
+# RAM -- rather than for this laptop, so that what runs here is what runs
+# there. Postgres is the only component given real memory.
+
+services:
+  db:
+    # Multi-arch (amd64 + arm64) build of PostgreSQL 16 / PostGIS 3.4, from the
+    # maintainer of the official docker-postgis images. The official
+    # postgis/postgis tags are amd64-only, which on an Apple Silicon
+    # development machine means the database runs under QEMU emulation --
+    # crippling for the reprojection of 1.48M polygons in the load step.
+    # This image runs natively both here and on the amd64 deploy target, so
+    # local and production stay on one image rather than diverging.
+    image: imresamu/postgis:16-3.4
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-fieldscope}
+      POSTGRES_USER: ${POSTGRES_USER:-fieldscope}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fieldscope}
+    # shared_buffers stays small because the VM has ~1 GB total and three
+    # processes want it. maintenance_work_mem is the exception: it is only
+    # held during CREATE INDEX, and the GiST build over 1.48M polygons is the
+    # slowest step of the load by a wide margin (§10 step 2).
+    command: >
+      postgres
+      -c shared_buffers=128MB
+      -c work_mem=16MB
+      -c maintenance_work_mem=256MB
+      -c max_connections=20
+      -c random_page_cost=1.1
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fieldscope} -d ${POSTGRES_DB:-fieldscope}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  cache:
+    image: redis:7-alpine
+    # Capped and eviction-enabled because it shares 1 GB with Postgres. Cached
+    # /area responses are regenerable, so eviction costs a recomputation and
+    # nothing else -- and persistence is switched off for the same reason.
+    command: >
+      redis-server
+      --maxmemory 128mb
+      --maxmemory-policy allkeys-lru
+      --save ""
+      --appendonly no
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: ./serving
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-fieldscope}:${POSTGRES_PASSWORD:-fieldscope}@db:5432/${POSTGRES_DB:-fieldscope}
+      REDIS_URL: redis://cache:6379/0
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    # The loader runs in this same image (it needs psycopg and pyarrow, which
+    # the batch venv has no reason to carry), so the data and scripts
+    # directories are mounted rather than baked in -- data/ is gitignored and
+    # multi-GB, and must never enter an image layer.
+    volumes:
+      - ./data:/app/data:ro
+      - ./scripts:/app/scripts:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      cache:
+        condition: service_healthy
+
+volumes:
+  pgdata:
