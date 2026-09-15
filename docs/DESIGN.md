@@ -82,15 +82,20 @@ survey areas are present.
 ## 4. Architecture
 
 ```
-OFFLINE (batch, scheduled)                ONLINE (always on, edge)
+OFFLINE (batch, scheduled)              ONLINE (container)
 
- public datasets                           Workers API
-   CDL raster ──┐                            key lookups only
-   SSURGO      ─┼──▶ Spark + Sedona          KV cache for hot keys
-   USDM        ─┘      spatial join                 │
-                            │                       ▼
-                            ▼                   map frontend
-                  compact lookup table   ──load──▶
+ public datasets                         React + TypeScript + MapLibre
+   CDL raster ──┐                          (Cloudflare Pages)
+   SSURGO      ─┼──▶ Spark + Sedona                │ HTTPS
+   USDM        ─┘      spatial join        Cloudflare (CDN, TLS, Tunnel)
+                            │                       │
+                            ▼                       ▼
+                  overlay.parquet ──load──▶  FastAPI ──── Redis
+                   155,025 rows                 │        (cache)
+                                                ▼
+                                       PostgreSQL + PostGIS
+
+        GCP e2-micro · Docker Compose · Terraform · GitHub Actions
 ```
 
 The split in §5.1 is the load-bearing decision; everything else follows from
@@ -123,8 +128,11 @@ fixed, and soil changes effectively never, land cover annually, drought weekly.
 
 **Consequences.**
 
-- The serving tier needs no spatial capability at all, which is what makes a
-  plain key-value or SQLite-class store viable at the edge (see §5.7).
+- ~~The serving tier needs no spatial capability at all.~~ **Revised
+  2026-09-14 (§5.6).** This followed from an edge-latency target that no longer
+  applies; the serving tier now uses PostGIS to resolve which precomputed rows
+  a drawn field needs. The core of this decision is unaffected — the expensive
+  overlay is still computed once, offline, and no request recomputes it.
 - Staleness is bounded by refresh cadence, and drought — the only fast-moving
   input — needs a refresh path (cheap, by §5.4).
 - Measured compression at county scale: 2,079,440 input records → **5,349
@@ -350,11 +358,11 @@ bbox filter selecting far more polygons, or far more complex geometry, than a
 typical block. A grid that equalises *points* does not equalise *polygons*, and
 nothing currently measures the latter per block.
 
-### 5.6 Serving key design — OPEN
+### 5.6 Serving key design — request-time spatial lookup
 
-**Status:** open; blocks §5.7
+**Status:** decided 2026-09-14
 
-**Context.** The current output is keyed by
+**Context.** The overlay is keyed by
 `(mukey, musym, areasymbol, crop_code, drought_class)`. That answers "what is
 on this soil map unit" — but the product question is "what is under the field
 I just drew," which is not the same lookup.
@@ -362,42 +370,67 @@ I just drew," which is not the same lookup.
 **Options.**
 
 1. **Spatial query at request time** against soil polygons with a GiST index.
-   Straightforward and exact, but reintroduces geometry into the hot path and
-   undermines §5.1.
+   Exact and straightforward, but reintroduces geometry into the request path.
 2. **Grid-cell precomputation.** Bucket the output into fixed cells and store
-   cell → overlay summary. A drawn field maps to covering cells by arithmetic,
-   with no geometry at request time.
+   cell → overlay summary, so a drawn field maps to covering cells by
+   arithmetic with no geometry at request time.
 
-**Leaning.** Option 2, consistent with §5.1.
+**Decision. Option 1.**
 
-**Discussion points.**
+**Why the earlier leaning reversed.** Option 2 was preferred while the serving
+tier was assumed to be an edge runtime with a sub-50ms global target, because
+an edge Worker cannot hold a spatial index and a cross-region database round
+trip would have dominated the budget. That constraint is gone: the serving tier
+is now a container (§5.11), and the realistic audience is a small number of
+people clicking a portfolio link, not a global user base. With the latency
+constraint removed, option 2 is more code and a stated error budget in exchange
+for an approximation of an answer PostGIS gives exactly.
 
-- Cell size is the central knob: finer cells mean better spatial fidelity and
-  more rows. Row count ≈ cells × distinct (soil, cover) combinations per cell,
-  so a per-combination schema risks multiplying into millions of rows at state
-  scale. The pre-cell state figure is now measured at 155,025 rows (§5.7), so
-  the multiplier is what matters, not the base. Storing one row per cell with the summary as a compact blob keeps the
-  table small and the lookup single-keyed.
-- The cell function must be computable in a Worker from lon/lat (see §5.2).
-- This is an accuracy-for-latency trade and needs a stated error budget, not
-  just a chosen number.
+**Consequences.**
 
-### 5.7 Serving store — OPEN
+- Soil polygons must live in the serving store, not just the overlay table.
+  That is 1,482,366 polygons and ~2.1 GB of geometry — comfortably within
+  PostGIS's normal range and within the disk budget of §5.11.
+- **This revises a consequence of §5.1.** That decision concluded the serving
+  tier "needs no spatial capability at all," which was true given an edge
+  target and is not true now. §5.1's core claim is untouched: the expensive
+  overlay is still precomputed offline, and no request recomputes it. What
+  changed is only how a request finds *which* precomputed rows it needs.
+- Two endpoints fall out: `GET /mapunit/{mukey}` returns one map unit's
+  breakdown (7,534 of them, ~1.4 KB each), and `POST /area` takes a drawn
+  GeoJSON polygon, resolves the intersecting map units spatially, and
+  aggregates their overlay rows.
 
-**Status:** open; decide once §5.6 fixes the row count
+### 5.7 Serving store — PostgreSQL + PostGIS, with Redis in front
 
-**Context.** Deliberately deferred until the output size was known. County
-output is 5,349 rows; **the Indiana output is 155,025 rows (1.3 MB Parquet,
-7,534 distinct map units)**, measured on the completed run of §9. §5.6 still
-changes the shape, so this does not settle the store on its own — but it does
-bound it: the current key produces a table small enough that every candidate
-store handles it comfortably, and the question becomes what §5.6's cell
-scheme multiplies it by.
+**Status:** decided 2026-09-14
 
-**Note.** Because §5.1 removed request-time geometry, the store does not need
-spatial support — which is precisely what puts a SQLite-class edge database in
-play alongside PostGIS. The architectural choice cascades into the
-infrastructure choice.
+**Context.** County output is 5,349 rows; **the Indiana output is 155,025 rows
+(1.3 MB Parquet, 7,534 distinct map units)**, measured on the completed run of
+§9. §5.6 adds the soil polygons themselves to the store.
+
+**Decision.** PostgreSQL with PostGIS as the store, Redis as a read-through
+cache in front of the aggregation endpoint.
+
+**Why Postgres.** The data is relational, the queries are relational, and §5.6
+needs a spatial index. Row counts are small enough that the choice is driven by
+capability rather than scale.
+
+**Why Redis is load-bearing here and would not have been before.** Under the
+edge design there was nothing to cache: the store was already globally
+replicated and a lookup was a single key read, so a cache in front of it would
+have been decoration. §5.6 changes that. `POST /area` does real per-request
+work — a spatial lookup followed by an aggregation across every map unit the
+drawn polygon touches — and the query space is unbounded, because a user can
+draw any polygon. That is precisely the shape a read-through cache exists for:
+expensive to compute, cheap to store, repeated in practice.
+
+**How its value must be stated.** This project will not have meaningful
+traffic, so no hit-rate or latency figure from production would mean anything.
+Any performance claim must be a **benchmark under stated synthetic load**,
+described as such — consistent with the rule that no claim outruns a
+measurement. "p50 X ms uncached, Y ms cached, at N req/s synthetic" is honest;
+"serves users in Y ms" would not be.
 
 ### 5.8 State-scale acquisition
 
@@ -512,6 +545,76 @@ and then as a stated accuracy trade rather than a free optimisation.
 
 ---
 
+### 5.11 Serving stack and deployment
+
+**Status:** decided 2026-09-14
+
+**Context.** The batch half is done (§9). The serving half has to demonstrate
+breadth — an API, a store, a frontend, a deploy — on a budget of roughly zero,
+and the deployed link has to still work unattended a year from now, because its
+audience is people reading a portfolio.
+
+**Decision.**
+
+| Layer | Choice |
+|---|---|
+| API | FastAPI + Pydantic + SQLAlchemy + Alembic, served by Uvicorn |
+| Store | PostgreSQL + PostGIS (§5.7) |
+| Cache | Redis (§5.7) |
+| Frontend | React + TypeScript + MapLibre GL, on Cloudflare Pages |
+| Packaging | Docker + Docker Compose |
+| Host | GCP `e2-micro`, Always Free tier |
+| Ingress | Cloudflare Tunnel — outbound only, no public IP on the origin |
+
+**Not on the critical path.** Terraform and GitHub Actions are both worth
+having eventually and neither is a prerequisite for anything above. Terraform
+earns its keep across many resources; this is one VM, and `gcloud compute
+instances create` plus `docker compose up` reaches the same place without the
+detour. CI is cheap to add once there is a service to test. Add them if they
+fall out naturally; do not schedule work around them.
+
+**Why a container rather than the edge.** The edge design was chosen for global
+latency. With that requirement gone (§5.6), a container is simpler, keeps the
+whole system in one place, and exercises the ordinary deployment skills the
+edge version skips.
+
+**The cache benchmark is a deliverable, not a side effect.** The point of §5.7's
+Redis layer is to produce a defensible number, so it is measured deliberately:
+`POST /area` driven at a stated request rate over a fixed set of drawn
+polygons, p50 and p95 recorded with the cache cold and warm, hit rate reported
+alongside. Methodology stated with the figure, per §7. This is the one
+performance claim the serving tier is expected to make, and it is honest
+precisely because it is labelled a benchmark rather than production traffic.
+
+**Why this hosting.** GCP's Always Free tier covers one `e2-micro` with 30 GB
+of disk and 1 GB of monthly egress, indefinitely — not trial credits, so it
+does not consume a credit allowance that may be wanted elsewhere. Cloudflare
+Tunnel exposes it without a public IP, and Pages hosts the frontend. Total
+cost: zero. Durability matters more than performance here, because the failure
+mode that actually hurts is a dead link months later, and expiring free tiers
+are how that happens.
+
+**Known risk.** `e2-micro` is ~1 GB of RAM for Postgres, PostGIS, Redis, and
+the API together. Mitigations in order of preference: tune `shared_buffers`
+down and cap Redis with `maxmemory`; `ST_Simplify` the polygons for the demo;
+move to `e2-small` (~$13/month) only if the first two fail.
+
+**Deliberately excluded.** Recorded because the reasons are the point:
+
+- **Kafka** — the only recurring input is a weekly drought refresh (§5.4).
+  That is a cron job. There is no event stream and no volume to justify one.
+- **Kubernetes** — three containers on one host. Compose is the correct tool at
+  this size; Kubernetes here would be ceremony.
+- **Cassandra / ClickHouse** — 155,025 rows.
+- **MySQL, Memcached** — Postgres and Redis already occupy those roles.
+- **Go** — a genuine gap and a reasonable later addition as a separate focused
+  service, but splitting the API across two backend languages now would buy a
+  keyword rather than an improvement.
+
+**Frontend resilience.** The frontend ships with a static snapshot of the
+overlay and falls back to it when the API does not answer, so the demo link
+degrades rather than breaking if the origin is ever down.
+
 ## 6. Correctness
 
 `scripts/validate_join.py` recomputes the same answer by an unrelated route —
@@ -546,8 +649,11 @@ repository cites that, the sample size, and the hardware.
 | 3a | Indiana SSURGO acquisition (§5.8) | done |
 | 3b | State-scale join strategy (§5.5) | done — verified on county data |
 | 3c | The Indiana run itself | done — 2026-09-14, see §9 |
-| 4 | Serving key design (§5.6) and store (§5.7) | open |
-| 5 | Edge API + measured multi-region latency | open |
+| 4 | Serving key design (§5.6) and store (§5.7) | done — decided 2026-09-14 |
+| 5a | FastAPI service + Postgres/PostGIS + Redis, in Compose | **next** |
+| 5b | Cache benchmark: p50/p95 cold vs warm, stated load (§5.7) | open |
+| 5c | Deploy to GCP behind Cloudflare Tunnel (§5.11) | open |
+| 5d | Terraform, CI — optional, not blocking (§5.11) | stretch |
 | 6 | Map frontend, public demo — needs §5.9 first | open |
 | 7 | Scheduled weekly drought refresh (cheap, by §5.4) | stretch |
 
