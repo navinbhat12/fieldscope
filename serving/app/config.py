@@ -28,6 +28,10 @@ class Settings:
     # here so the API and the future cache agree on one value.
     coord_precision: int = 6
 
+    # Switched off by the benchmark to measure the uncached path against the
+    # same running service, rather than inferring it from a cold cache.
+    cache_enabled: bool = True
+
 
 def load_settings() -> Settings:
     return Settings(
@@ -38,4 +42,5 @@ def load_settings() -> Settings:
         redis_url=os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
         max_query_acres=float(os.environ.get("MAX_QUERY_ACRES", 100_000)),
         coord_precision=int(os.environ.get("COORD_PRECISION", 6)),
+        cache_enabled=os.environ.get("CACHE_ENABLED", "1") not in ("0", "false", "False"),
     )

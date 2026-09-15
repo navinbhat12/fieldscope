@@ -50,6 +50,21 @@ def dsn_from_env() -> str:
     return url.replace("postgresql+psycopg://", "postgresql://")
 
 
+def flush_cache() -> None:
+    """Drop cached /area answers, which now describe superseded data."""
+    url = os.environ.get("REDIS_URL")
+    if not url:
+        log("cache: REDIS_URL unset, nothing to flush")
+        return
+    try:
+        import redis
+
+        redis.from_url(url, socket_timeout=2).flushdb()
+        log("cache: flushed")
+    except Exception as exc:  # a stale cache must not fail an otherwise good load
+        log(f"cache: flush failed ({exc}); clear it manually before benchmarking")
+
+
 def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
@@ -238,6 +253,12 @@ def main() -> None:
             t: conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
             for t in ("overlay", "soil_polygon", "mukey_area")
         }
+
+    # Invalidate by flushing rather than by expiry (§10 step 4): cached answers
+    # describe the data that was loaded when they were computed, and nothing
+    # else changes them. A TTL would discard work that is still correct, while
+    # leaving genuinely stale answers alive until it happened to fire.
+    flush_cache()
 
     log(f"done in {(time.time() - started) / 60:.1f} min: {counts}")
 

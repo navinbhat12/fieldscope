@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from sqlalchemy import text
 
+from .cache import Cache, key_for, normalise
 from .config import load_settings
 from .db import make_engine
 from .models import (
@@ -27,6 +28,7 @@ log = logging.getLogger("fieldscope")
 
 settings = load_settings()
 engine = make_engine(settings)
+cache = Cache(settings.redis_url, enabled=settings.cache_enabled)
 
 
 @asynccontextmanager
@@ -55,7 +57,7 @@ app = FastAPI(
 def health() -> dict:
     with engine.connect() as conn:
         rows = conn.execute(text("SELECT count(*) FROM overlay")).scalar()
-    return {"status": "ok", "overlay_rows": rows}
+    return {"status": "ok", "overlay_rows": rows, "cache": cache.stats()}
 
 
 @app.get("/mapunit/{mukey}", response_model=MapUnitResponse)
@@ -84,6 +86,8 @@ def mapunit(mukey: str) -> MapUnitResponse:
             for r in rows
         ],
     )
+    cache.set(cache_key, response.model_dump())
+    return response
 
 
 @app.post("/area", response_model=AreaResponse)
@@ -93,7 +97,15 @@ def area(req: AreaRequest) -> AreaResponse:
     The expensive endpoint, and the reason the cache in §5.7 exists: the query
     space is unbounded because a caller can draw anything.
     """
-    geojson = json.dumps(req.geometry.model_dump())
+    # Normalise first, then use the *normalised* polygon for both the cache key
+    # and the query, so one key cannot map to several different answers.
+    geometry = normalise(req.geometry.model_dump(), settings.coord_precision)
+    geojson = json.dumps(geometry)
+
+    cache_key = key_for(geometry)
+    hit = cache.get(cache_key)
+    if hit is not None:
+        return AreaResponse(**{**hit, "cached": True})
 
     with engine.connect() as conn:
         # Pre-flight: measure the polygon before touching 1.48M rows with it.
@@ -130,18 +142,22 @@ def area(req: AreaRequest) -> AreaResponse:
     # A polygon over open water or outside Indiana intersects nothing. That is
     # a real answer, not an error -- report it as empty with zero coverage.
     if not rows:
-        return AreaResponse(
+        empty = AreaResponse(
             query_acres=round(query_acres, 3),
             answered_acres=0.0,
             coverage=0.0,
             map_units=0,
             breakdown=[],
         )
+        # Cached deliberately: discovering that a polygon covers open water
+        # costs the same spatial lookup as discovering that it covers corn.
+        cache.set(cache_key, empty.model_dump())
+        return empty
 
     answered_acres = rows[0]["answered_m2"] / M2_PER_ACRE
     total = sum(r["acres"] for r in rows) or 1.0
 
-    return AreaResponse(
+    response = AreaResponse(
         query_acres=round(query_acres, 3),
         answered_acres=round(answered_acres, 3),
         coverage=round(answered_acres / query_acres, 4) if query_acres else 0.0,
@@ -158,3 +174,5 @@ def area(req: AreaRequest) -> AreaResponse:
             for r in rows
         ],
     )
+    cache.set(cache_key, response.model_dump())
+    return response
