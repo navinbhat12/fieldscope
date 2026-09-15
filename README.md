@@ -161,7 +161,10 @@ curl -X POST localhost:8000/area -H 'Content-Type: application/json' \
 
 ### Measured latency
 
-![POST /area latency against cache hit rate. p95 falls from 63.5 ms at a cold cache to 9.2 ms once every request hits, while p50 stays near 7 ms; a table lists p50, p95 and the run-to-run ranges at 0, 50, 90 and 100 percent hit rates.](docs/img/cache-benchmark.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/hitrate-dark.svg">
+  <img alt="POST /area latency against cache hit rate. p95 falls from 63.5 ms at a cold cache to 9.2 ms once every request hits, while p50 stays near 7 ms; a table lists p50, p95 and the run-to-run ranges at 0, 50, 90 and 100 percent hit rates." src="docs/img/hitrate-light.svg">
+</picture>
 
 **This is a benchmark under synthetic load, not production traffic** — this
 service has no users, and a latency figure presented as production behaviour
