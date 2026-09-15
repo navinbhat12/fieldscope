@@ -9,11 +9,12 @@ underneath it — soil composition, crop cover, and current drought conditions �
 as a single low-latency lookup, rather than as an expensive geometric
 computation performed per request.
 
-> **Status: batch pipeline complete, serving tier in development.** The
-> distributed join runs at state scale — every figure in this README is
-> measured from an actual run. The API and frontend are not built yet and are
-> described as targets. No performance claim appears here until it has been
-> benchmarked.
+> **Status: batch pipeline and API both built and measured; not yet deployed.**
+> The distributed join runs at state scale and the serving tier answers against
+> its output locally. Every figure in this README is measured from an actual
+> run, with the method stated beside it. The frontend and the public deployment
+> are not built yet and are described as targets. No performance claim appears
+> here until it has been benchmarked, and the benchmark is labelled as such.
 
 ---
 

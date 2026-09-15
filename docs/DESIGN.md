@@ -650,9 +650,9 @@ repository cites that, the sample size, and the hardware.
 | 3b | State-scale join strategy (§5.5) | done — verified on county data |
 | 3c | The Indiana run itself | done — 2026-09-14, see §9 |
 | 4 | Serving key design (§5.6) and store (§5.7) | done — decided 2026-09-14 |
-| 5a | FastAPI service + Postgres/PostGIS + Redis, in Compose | **next** |
-| 5b | Cache benchmark: p50/p95 cold vs warm, stated load (§5.7) | open |
-| 5c | Deploy to GCP behind Cloudflare Tunnel (§5.11) | open |
+| 5a | FastAPI service + PostGIS + Redis, in Compose | done — 2026-09-14, see §10 |
+| 5b | Cache benchmark: p50/p95 by hit rate, stated load (§5.7) | done — 2026-09-14, see §11 |
+| 5c | Deploy to GCP behind Cloudflare Tunnel (§5.11) | **next** |
 | 5d | Terraform, CI — optional, not blocking (§5.11) | stretch |
 | 6 | Map frontend, public demo — needs §5.9 first | open |
 | 7 | Scheduled weekly drought refresh (cheap, by §5.4) | stretch |
@@ -745,11 +745,28 @@ an "under review" note and now needs rewriting.
 
 ---
 
-## 10. Next action: build the serving tier
+## 10. The serving tier — built
 
-**This section is written for a session with no prior context.** The batch half
-is done and validated (§9). Everything below is milestone 5, and the decisions
-it implements are §5.6 (key design), §5.7 (store) and §5.11 (stack).
+**Status: steps 1-5 are done and committed (2026-09-14); step 6, the deploy, is
+not.** This section was written as a build plan for a session with no prior
+context, and is kept as the record of what was built and in what order. Where
+the plan met something it did not know, the amendments are recorded at the end
+of this section rather than by editing the steps. §11 has the benchmark.
+
+**What runs today:**
+
+```bash
+docker compose up -d
+docker compose run --rm api python scripts/load_serving.py   # ~2.3 min
+```
+
+That gives `GET /mapunit/{mukey}`, `POST /area`, `POST /ping` (a benchmark
+control) and `GET /health`, over 155,025 overlay rows, 1,482,366 soil polygons
+and 10,013 per-map-unit area totals. The load is idempotent: re-running
+reproduces those counts exactly.
+
+Everything below is milestone 5, and the decisions it implements are §5.6 (key
+design), §5.7 (store) and §5.11 (stack).
 
 **Do not re-run the Spark join.** `data/processed/overlay_indiana.parquet`
 already exists — 155,025 rows, 1.3 MB — and is the input to step 2.
@@ -1010,3 +1027,49 @@ unexplained block 92 of the Indiana join (§5.5): in both cases a small subset o
 the workload dominates the total, and in neither case does anything yet count
 what makes those cases different.
 
+
+## 12. Next steps
+
+Ordered by what unblocks what, current as of 2026-09-14. Milestone numbers refer
+to §8.
+
+**1. Deploy (5c).** The only thing between this and a link someone can click.
+`gcloud compute instances create` for an e2-micro on the Always Free tier,
+`docker compose up`, `cloudflared` for ingress (§5.11). Needs account access, so
+it is not unattended work. Two things to expect: the soil geometry is ~2.3 GB
+loaded against 30 GB of disk, comfortable; and ~1 GB of RAM shared between
+Postgres, Redis and the API is the real risk, with mitigations in §5.11 in order
+of preference. **The laptop benchmark does not transfer** — a shared vCPU is a
+different machine, so §11 has to be re-run there before any figure is quoted
+next to the deployed link.
+
+**2. Settle §5.9, because it blocks the frontend.** Now measured rather than
+suspected: `drought_class` takes exactly two values across all 155,025 rows,
+`-1` and `0`. Indiana has no drought at all, so the layer is empty rather than
+sparse, and whatever the frontend renders for it would be honest and blank. The
+three options are to cut the layer, to show a national inset where drought does
+exist, or to backfill a historical week when Indiana was in drought and label it
+as such. This is a product decision, not an engineering one.
+
+**3. More states (§ "Planned: more than one state").** The real fix for §5.9 and
+independently worth doing: Indiana alone exercises two of the three datasets.
+Nothing in `serving/` hardcodes Indiana and both loader inputs are selected by
+`--aoi`, so the work is acquisition plus storage headroom, not a rewrite. Decide
+from measured table sizes, not estimates.
+
+**4. Frontend.** React + TypeScript + MapLibre on Cloudflare Pages (§5.11),
+after §5.9 decides what the drought layer shows. Ships with a static snapshot of
+the overlay so the demo degrades rather than breaking if the origin is down.
+
+**5. The heavy tail, unexplained.** Uncached p99 is 220 ms and the slowest single
+request observed was 616 ms, against a 7.8 ms median (§11). A small subset of
+polygons touches enough map units to cost two orders of magnitude more than a
+typical one, and nothing measures which or why. The first step is cheap:
+correlate `/area` latency against the number of map units a polygon intersects,
+which the endpoint already returns. This rhymes with block 92 of the Indiana
+join (§5.5) — in both cases a small part of the workload dominates the total and
+nothing yet counts what makes those cases different.
+
+**Explicitly not next.** Terraform and CI (§5.11) remain optional and
+non-blocking. Alembic stays unnecessary until a loaded VM exists and a reload
+costs an hour rather than three minutes (§ "Amendments made during the build").
