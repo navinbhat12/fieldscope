@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fieldscope — cache benchmark</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+  :root{--bg:#0f0e0d;--card:#191817;--ink:#f6f3ec;--ink2:#cdc8bd;--muted:#918c82;
+        --rule:#2c2926;--p50:#3987e5;--p95:#e8632c;--good:#2bb98a;}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font-family:"IBM Plex Sans",-apple-system,Segoe UI,Helvetica,Arial,sans-serif;
+       display:flex;justify-content:center;padding:40px 24px}
+  .card{width:100%;max-width:1020px;background:var(--card);border:1px solid var(--rule);
+        border-radius:16px;padding:34px 36px 30px}
+  h1{font-size:25px;font-weight:600;letter-spacing:-.02em;margin:0 0 8px}
+  .sub{color:var(--muted);font-size:14.5px;margin:0 0 26px}
+  .legend{display:flex;gap:22px;margin-bottom:8px;font-size:13px;color:var(--ink2)}
+  .lg{display:flex;align-items:center;gap:8px}
+  .sw{width:11px;height:11px;border-radius:3px}
+  svg{display:block;width:100%;height:auto}
+  .grid{display:grid;grid-template-columns:auto 1fr auto auto auto;column-gap:30px;
+        margin-top:24px;padding-top:20px;border-top:1px solid var(--rule)}
+  .gh{font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.09em;
+      text-transform:uppercase;color:var(--muted);padding-bottom:10px;
+      border-bottom:1px solid var(--rule)}
+  .gc{font-size:14px;padding:11px 0;border-bottom:1px solid #232120;color:var(--ink2)}
+  .mono{font-family:"IBM Plex Mono",monospace;font-variant-numeric:tabular-nums}
+  .strong{color:var(--ink);font-weight:600}
+  .num{text-align:right}
+  .dim{color:var(--muted);font-size:11.5px}
+  .foot{margin-top:24px;font-size:11.5px;color:var(--muted);line-height:1.6}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script>
+const h=React.createElement,{useState}=React;
+
+const P=[
+ {hit:0,  name:"Cold cache", sub:"every request a miss", p50:8.52,p50r:[8.32,8.89], p95:63.53,p95r:[61.89,63.59]},
+ {hit:50, name:"Mixed load", sub:"half the requests hit", p50:7.30,p50r:[7.11,7.67], p95:23.98,p95r:[23.41,31.43]},
+ {hit:90, name:"Mixed load", sub:"nine in ten hit",      p50:7.49,p50r:[5.62,7.70], p95:12.81,p95r:[12.44,16.69]},
+ {hit:100,name:"Warm cache", sub:"every request a hit",p50:6.14,p50r:[5.99,6.29],p95:9.20, p95r:[8.86,9.35]},
+];
+const FLOOR=5.03;
+
+function Chart({sel,pick}){
+  const W=940,H=400,L=58,R=104,T=26,B=52,YM=70;
+  const x=v=>L+(v/100)*(W-L-R), y=v=>T+(1-v/YM)*(H-T-B);
+  const path=k=>P.map((p,i)=>`${i?"L":"M"}${x(p.hit).toFixed(1)} ${y(p[k]).toFixed(1)}`).join(" ");
+  return h("svg",{viewBox:`0 0 ${W} ${H}`},
+    h("rect",{x:L,y:y(FLOOR),width:W-L-R,height:(H-T-B)*(FLOOR/YM),fill:"#918c82",opacity:.12}),
+    [0,10,20,30,40,50,60,70].map(t=>h("g",{key:t},
+      h("line",{x1:L,y1:y(t),x2:W-R,y2:y(t),stroke:"#2c2926",strokeWidth:1}),
+      h("text",{x:L-12,y:y(t)+4,fontSize:11.5,fill:"#918c82",textAnchor:"end",
+                fontFamily:"IBM Plex Mono, monospace"},t))),
+    h("text",{x:L-12,y:T-8,fontSize:11,fill:"#918c82",textAnchor:"end",
+              fontFamily:"IBM Plex Mono, monospace"},"ms"),
+    h("line",{x1:x(sel),y1:T,x2:x(sel),y2:H-B,stroke:"#3a3733",strokeWidth:2}),
+    h("text",{x:L+10,y:y(FLOOR)+18,fontSize:11,fill:"#918c82"},
+      "transport floor · 5.03 ms · no cache can remove this"),
+    ["p95","p50"].map(k=>h("path",{key:k,d:path(k),fill:"none",
+      stroke:k==="p95"?"#e8632c":"#3987e5",strokeWidth:2.5,strokeLinejoin:"round",strokeLinecap:"round"})),
+    ["p95","p50"].map(k=>P.map(p=>h("circle",{key:k+p.hit,cx:x(p.hit),cy:y(p[k]),
+      r:sel===p.hit?6.5:4.5,fill:k==="p95"?"#e8632c":"#3987e5",stroke:"#191817",strokeWidth:2,
+      style:{cursor:"pointer"},onClick:()=>pick(p.hit)}))),
+    h("text",{x:x(0)+14,y:y(P[0].p95)+4,fontSize:13,fill:"#e8632c",fontWeight:600,
+              fontFamily:"IBM Plex Mono, monospace"},"63.5 ms"),
+    h("text",{x:x(0)+14,y:y(P[0].p50)-14,fontSize:13,fill:"#3987e5",fontWeight:600,
+              fontFamily:"IBM Plex Mono, monospace"},"8.5 ms"),
+    h("text",{x:x(100)+12,y:y(P[3].p95)-8,fontSize:13,fill:"#e8632c",fontWeight:600,
+              fontFamily:"IBM Plex Mono, monospace"},"9.2 ms"),
+    h("text",{x:x(100)+12,y:y(P[3].p50)+18,fontSize:13,fill:"#3987e5",fontWeight:600,
+              fontFamily:"IBM Plex Mono, monospace"},"6.1 ms"),
+    h("text",{x:x(50)+16,y:y(P[1].p95)-16,fontSize:13,fill:"#f6f3ec",fontWeight:600},
+      "62% lower tail even at a 50% hit rate"),
+    h("text",{x:x(50)+16,y:y(P[1].p95),fontSize:11.5,fill:"#918c82"},
+      "and 86% lower once traffic repeats"),
+    P.map(p=>h("text",{key:"x"+p.hit,x:x(p.hit),y:H-B+24,fontSize:12.5,textAnchor:"middle",
+      fill:sel===p.hit?"#f6f3ec":"#918c82",fontWeight:sel===p.hit?600:400,
+      fontFamily:"IBM Plex Mono, monospace"},p.hit+"%")),
+    h("text",{x:L+(W-L-R)/2,y:H-8,fontSize:11.5,fill:"#918c82",textAnchor:"middle"},"cache hit rate"));
+}
+
+function App(){
+  const sel=50;
+  return h("div",{className:"card"},
+    h("h1",null,"Redis cuts tail latency 7×"),
+    h("p",{className:"sub"},
+      "POST /area p95 falls from 63.5 ms to 9.2 ms as requests repeat — a 6.9× reduction on a "
+      + "spatial aggregation over 1.48M soil polygons."),
+    h("div",{className:"legend"},
+      h("span",{className:"lg"},h("span",{className:"sw",style:{background:"#e8632c"}}),"p95 — the tail"),
+      h("span",{className:"lg"},h("span",{className:"sw",style:{background:"#3987e5"}}),"p50 — the median"),
+      h("span",{className:"lg"},h("span",{className:"sw",style:{background:"#918c82",opacity:.4}}),"transport floor")),
+    h(Chart,{sel,pick:()=>{}}),
+    h("div",{className:"grid"},
+      h("div",{className:"gh"},"Hit rate"),
+      h("div",{className:"gh"},"State"),
+      h("div",{className:"gh num"},"p50"),
+      h("div",{className:"gh num"},"p95"),
+      h("div",{className:"gh num"},"p95 vs 0% hit"),
+      P.map(q=>{
+        const cut=(1-q.p95/P[0].p95)*100;
+        return h(React.Fragment,{key:q.hit},
+          h("div",{className:"gc mono strong"},q.hit+"%"),
+          h("div",{className:"gc"},q.name,h("span",{className:"dim"}," — "+q.sub)),
+          h("div",{className:"gc num mono"},q.p50.toFixed(2),
+            h("span",{className:"dim"}," ("+q.p50r[0]+"–"+q.p50r[1]+")")),
+          h("div",{className:"gc num mono",style:{color:"#e8632c"}},q.p95.toFixed(2),
+            h("span",{className:"dim"}," ("+q.p95r[0]+"–"+q.p95r[1]+")")),
+          h("div",{className:"gc num mono",style:{color:cut>0?"#2bb98a":"#918c82"}},
+            cut>0?"−"+cut.toFixed(0)+"%":"—"));
+      })),
+    h("div",{className:"foot"},
+      "300 field-sized polygons · open-loop at 50 req/s · 300 requests per run · 5 runs per hit rate, first discarded · median of per-run medians.",
+      h("br"),
+      "Synthetic load against a local Docker Compose stack — not production traffic. Apple M2 Pro, 10 cores · PostgreSQL 16 / PostGIS 3.4 · Redis 7."));
+}
+ReactDOM.createRoot(document.getElementById("root")).render(h(App));
+</script>
+</body>
+</html>

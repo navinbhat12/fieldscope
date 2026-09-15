@@ -161,16 +161,15 @@ curl -X POST localhost:8000/area -H 'Content-Type: application/json' \
 
 ### Measured latency
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/img/benchmark-dark.svg">
-  <img alt="POST /area latency by cache state: p50 and p95 for a no-op control, uncached, cold cache and warm cache, at 50 requests per second" src="docs/img/benchmark-light.svg">
-</picture>
+![POST /area latency against cache hit rate. p95 falls from 63.5 ms at a cold cache to 9.2 ms once every request hits, while p50 stays near 7 ms; a table lists p50, p95 and the run-to-run ranges at 0, 50, 90 and 100 percent hit rates.](docs/img/cache-benchmark.png)
 
 **This is a benchmark under synthetic load, not production traffic** — this
 service has no users, and a latency figure presented as production behaviour
-would be false. The method is in the figure: a fixed, committed set of 300
-field-sized polygons, open-loop at a stated rate, five runs with the first
-discarded, and the observed range reported beside every median.
+would be false. Method: a fixed, committed set of 300 field-sized polygons
+driven open-loop at 50 req/s, 300 requests per run, five runs per hit rate with
+the first discarded; every figure is the median of per-run medians, with the
+observed range beside it. Measured on an Apple M2 Pro against PostgreSQL 16 /
+PostGIS 3.4 and Redis 7 in Docker Compose.
 
 | Phase | p50 | p95 | p99 |
 |---|---|---|---|
