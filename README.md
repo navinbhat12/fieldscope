@@ -9,10 +9,11 @@ underneath it — soil composition, crop cover, and current drought conditions �
 as a single low-latency lookup, rather than as an expensive geometric
 computation performed per request.
 
-> **Status: in development.** The batch pipeline is being built now. Numbers
-> below marked _(measured)_ come from actual runs; everything else is not yet
-> built and is described as a target. No performance claim appears here until
-> it has been benchmarked.
+> **Status: batch pipeline complete, serving tier in development.** The
+> distributed join runs at state scale — every figure in this README is
+> measured from an actual run. The API and frontend are not built yet and are
+> described as targets. No performance claim appears here until it has been
+> benchmarked.
 
 ---
 
@@ -40,21 +41,21 @@ including the ones still open.
 ## Architecture
 
 ```
-OFFLINE (batch, scheduled)              ONLINE (always on, edge)
+OFFLINE (batch, scheduled)              ONLINE (container)
 ┌────────────────────────────┐          ┌────────────────────────────┐
-│ Public datasets            │          │ Cloudflare Workers API     │
-│  · crop cover (raster)     │          │  · key lookups only        │
-│  · soil survey (vector)    │   load   │  · KV cache for hot keys   │
-│  · drought severity        │  ─────▶  │                            │
-│         │                  │          │         │                  │
-│         ▼                  │          │         ▼                  │
-│ Apache Spark + Sedona      │          │ React map frontend         │
-│  distributed join over     │          │  draw a field, see the     │
-│  ~10^8 records             │          │  overlay                   │
+│ Public datasets            │          │ React + TypeScript map     │
+│  · crop cover (raster)     │          │  draw a field, see the     │
+│  · soil survey (vector)    │          │  overlay                   │
+│  · drought severity        │          │         │                  │
+│         │                  │          │         ▼                  │
+│         ▼                  │   load   │ FastAPI ─── Redis cache    │
+│ Apache Spark + Sedona      │  ─────▶  │         │                  │
+│  distributed join over     │          │         ▼                  │
+│  10^8 records              │          │ PostgreSQL + PostGIS       │
 │         │                  │          └────────────────────────────┘
 │         ▼                  │
-│ Compact lookup table       │
-│  (GeoParquet → PostGIS/D1) │
+│ overlay.parquet            │           Docker Compose on one VM,
+│  155,025 rows              │           behind Cloudflare
 └────────────────────────────┘
 ```
 
@@ -66,35 +67,47 @@ iteration, then run unchanged across the state.
 | | Tippecanoe County | Indiana |
 |---|---|---|
 | Land cover records | 2,079,440 | 104,126,688 |
-| Soil polygons | 30,264 | 1,341,119 |
-| Distinct soil map units | 429 | — |
-| Soil geometry on disk | 36.6 MB | ~1.6 GB _(projected)_ |
-| **Join wall time** | **median 20.5s** | — |
-| **Throughput** | **~101,000 records/sec** | — |
-| Records matched to soil | 1,875,956 (90.2%) | — |
-| Precomputed output rows | 5,349 (389:1 compression) | — |
+| Soil polygons | 30,264 | 1,482,366 |
+| Distinct soil map units | 429 | 7,534 |
+| Soil geometry on disk | 36.6 MB | 2.1 GB |
+| **Join wall time** | **median 20.5s** | **4,103s** |
+| **Throughput** | **~101,000 records/sec** | **25,377 records/sec** |
+| Records matched to soil | 1,875,956 (90.2%) | 104,125,537 (99.999%) |
+| Precomputed output rows | 5,349 (389:1 compression) | 155,025 (672:1 compression) |
 
-Both Indiana input counts are measured, not extrapolated — land cover from the
-state raster directly, soil polygons from a Soil Data Access aggregate query.
-The join itself has not yet been run at state scale; see
-[docs/DESIGN.md §5.5](docs/DESIGN.md) for why the current strategy will not
-survive it.
+Every figure above is measured. The state join ran on 2026-09-14 and took 69
+minutes end to end.
+
+The state throughput is far below the county's, and that is a real finding
+rather than a rounding of it: one grid block out of 144 took 1,986s of the
+4,103s join — roughly 400x its neighbours — and the remaining 137 non-empty
+blocks averaged under 10 seconds each. Grid chunking assumes blocks are
+comparable work, and one block violates that badly. The cause is not yet
+established; see [docs/DESIGN.md §5.5](docs/DESIGN.md).
+
+Statewide the result reproduces, to the digit, percentages measured
+independently from the raster before the join existed: corn at 23.69% and
+soybeans at 22.93% of 23,156,980 acres.
 
 Timings come from `scripts/benchmark.py` on a 10-core local Spark session:
 median of 11 runs, range 14.6–54.3s. That spread is JVM warmup and page cache
 state, not variation in the work — no single-run figure is quoted anywhere in
 this repository.
 
-The 90.2% match rate is not data loss: soil polygons cover 90.3% of the raster
-footprint, and those two figures were computed independently and agree to
-within 0.1%.
+The county's 90.2% match rate is not data loss, and it is not a property of
+the ground either — it is an artifact of how that county's soil data was
+downloaded. Tippecanoe's raster footprint extends past the bounding box its
+soil tiles were requested for, so pixels in that margin had no polygon
+available to match. Indiana, fetched across its full bounding box, matches
+99.999%.
 
-> **Under review.** The *explanation* for that 9.8% — open water and
-> unsurveyed land — is in doubt. A statewide sample matched 100.00% of
-> records, which suggests the county gap is instead an artifact of the soil
-> download covering a smaller extent than the raster. The numbers above are
-> measured and stand; the reason given for them may not. See
-> [docs/DESIGN.md §9](docs/DESIGN.md).
+An earlier version of this README attributed the county's unmatched 9.8% to
+open water and unsurveyed land. The state run disproves that: 268,118 acres of
+open water appear *in* the Indiana overlay across 5,406 rows, so water pixels
+do match soil polygons — SSURGO maps water as map units of its own. Two
+independently computed figures agreed with each other, but both were measuring
+the same download extent rather than confirming an explanation. See
+[docs/DESIGN.md §9](docs/DESIGN.md).
 
 ### Correctness
 
@@ -187,11 +200,14 @@ area for that run alone. The join additionally takes:
 --limit N     # random sample of N land cover records
 ```
 
-Statewide, which needs the chunked path — see
+Statewide, which needs the chunked path. `--strategy broadcast` is required,
+not optional — without it the polygon count trips automatic strategy selection,
+which disables the per-block broadcast that chunking depends on. See
 [docs/DESIGN.md §9](docs/DESIGN.md):
 
 ```bash
-.venv/bin/python -u scripts/run_join.py --aoi indiana --chunks 8 --cores 6
+.venv/bin/python -u scripts/run_join.py --aoi indiana --strategy broadcast \
+  --chunks 12 --cores 6
 ```
 
 `data/` is gitignored; everything in it rebuilds from the scripts above. The

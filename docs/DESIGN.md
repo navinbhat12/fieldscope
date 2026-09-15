@@ -736,13 +736,86 @@ the agreement of two independently computed figures offered as confirmation;
 both figures can agree and still describe the same artifact. The claim carries
 an "under review" note and now needs rewriting.
 
-### Next actions
+### Follow-ups from this run
 
-1. **Fix the README's 9.8% claim** — see above. It is public-facing copy that
-   states something the data contradicts, which is the one kind of error this
-   project cannot afford.
-2. **Diagnose block 92** (§5.5). Measuring polygons-per-block is cheap and
-   would confirm or kill the bbox-density hypothesis; the fix, if confirmed, is
-   probably to split blocks on polygon count rather than on area.
-3. **§5.6 and §5.7 are now unblocked** — the row count they were waiting for is
-   155,025.
+- **Diagnose block 92** (§5.5). Measuring polygons-per-block is cheap and would
+  confirm or kill the bbox-density hypothesis; the fix, if confirmed, is
+  probably to split blocks on polygon count rather than on area. Not blocking.
+- The README's 9.8% claim was corrected on 2026-09-14 using the evidence above.
+
+---
+
+## 10. Next action: build the serving tier
+
+**This section is written for a session with no prior context.** The batch half
+is done and validated (§9). Everything below is milestone 5, and the decisions
+it implements are §5.6 (key design), §5.7 (store) and §5.11 (stack).
+
+**Do not re-run the Spark join.** `data/processed/overlay_indiana.parquet`
+already exists — 155,025 rows, 1.3 MB — and is the input to step 2.
+
+### Step 1 — Compose skeleton
+
+Create `docker-compose.yml` at the repo root with three services:
+
+- `db` — `postgis/postgis:16-3.4`, volume-backed, `shared_buffers` tuned low
+  (the deploy target is a 1 GB VM, §5.11)
+- `cache` — `redis:7-alpine`, `--maxmemory 128mb --maxmemory-policy allkeys-lru`
+- `api` — built from `serving/Dockerfile`, depends on both
+
+Keep the batch pipeline's `pyproject.toml` untouched; the service gets its own
+dependency set under `serving/`.
+
+### Step 2 — Loader
+
+`scripts/load_serving.py`, idempotent and re-runnable:
+
+1. `data/processed/overlay_indiana.parquet` → table `overlay`
+   (`mukey, musym, areasymbol, crop_code, land_cover, is_agricultural,
+   drought_class, pixels, acres`), indexed on `mukey`.
+2. `data/raw/ssurgo_indiana.parquet` → table `soil_polygon`
+   (`mukey`, `geom` in EPSG:5070), with a **GiST index on `geom`**. This is
+   1,482,366 rows and ~2.1 GB; expect it to be the slow part.
+
+Schema managed by Alembic so the deploy is reproducible.
+
+### Step 3 — API
+
+FastAPI under `serving/`, two endpoints from §5.6:
+
+- `GET /mapunit/{mukey}` — one map unit's land cover breakdown. 7,534 of these,
+  ~1.4 KB each, median 21 rows.
+- `POST /area` — takes a GeoJSON polygon, transforms it to EPSG:5070 (§5.2),
+  finds intersecting map units via the GiST index, aggregates their `overlay`
+  rows into a single breakdown weighted by intersected area.
+
+`POST /area` is the expensive one and the reason the cache exists.
+
+### Step 4 — Cache
+
+Redis read-through on `POST /area` only. Key = a hash of the **normalised**
+polygon — round coordinates to a fixed precision before hashing, or trivially
+different drawings of the same field will miss. No TTL needed: the underlying
+data changes only when the batch pipeline reruns, so invalidate by flushing on
+load rather than by expiry.
+
+### Step 5 — Benchmark (milestone 5b)
+
+The deliverable, per §5.7. Drive `POST /area` over a fixed set of drawn
+polygons at a stated request rate; record p50 and p95 with the cache cold and
+warm, and the hit rate. **State the methodology with the figure and label it a
+benchmark under synthetic load** — this project has no real traffic, and a
+latency number presented as production behaviour would be false (§7).
+
+### Step 6 — Deploy (milestone 5c)
+
+`gcloud compute instances create` for a GCP `e2-micro` on the Always Free tier,
+`docker compose up`, then `cloudflared` for ingress so the origin needs no
+public IP. Terraform and CI are explicitly **not** prerequisites (§5.11).
+
+### Not yet, and why
+
+The React frontend comes after §5.9, which is still open: Indiana has
+essentially no current drought, so the layer is truthful and empty and the demo
+looks broken. That decision shapes what the frontend renders, so it should be
+settled before the frontend is built — but it blocks none of steps 1-6.
