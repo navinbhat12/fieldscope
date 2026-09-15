@@ -14,8 +14,8 @@ from .config import Settings
 def make_engine(settings: Settings) -> Engine:
     return create_engine(
         settings.database_url,
-        pool_size=5,
-        max_overflow=5,
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_pool_size,
         pool_pre_ping=True,
         future=True,
     )

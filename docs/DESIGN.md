@@ -914,3 +914,99 @@ demoable. Decide with measured table sizes, not estimates.
 currently a cron job that changes nothing, because Indiana is never in drought.
 Against Kansas it becomes a visible, moving layer — which is a considerably
 better demonstration of why the pipeline reruns at all.
+
+## 11. The serving benchmark
+
+Milestone 5b. **Everything here is synthetic load against a local Docker
+Compose stack.** Fieldscope has no users, so no figure below describes
+production behaviour, and none is presented as though it does (§7).
+
+### Method
+
+- **A fixed, committed polygon set** — `scripts/bench_polygons.json`, 300
+  field-sized squares centred on randomly sampled Indiana map units that have
+  overlay coverage, in five size classes. The cost of `POST /area` scales with
+  how many map units a polygon touches, so one polygon size would measure one
+  shape of query rather than the endpoint. The set is committed so runs are
+  comparable across machines and dates, and it is larger than a run's request
+  count so every request in a cold run is a genuine first touch.
+- **Open-loop load.** Requests are issued on a fixed schedule at a target rate
+  rather than one after another. Closed-loop sending lets a slow server slow
+  the offered load, which hides precisely the queueing the rate exists to
+  expose. Achieved rate is reported next to the target; all runs held 50.0/s.
+- **Five runs per phase, the first discarded**, then the median of the per-run
+  medians with the full observed range. A single sample is not a claim.
+- **A no-op control.** `POST /ping` takes the identical request body and
+  returns immediately, measuring everything `/area` pays that is not the query:
+  HTTP, ASGI, Pydantic validation, JSON serialisation, and Docker's port
+  forwarding. Without it, any statement about what caching saves is unfounded,
+  because the difference could be dominated by transport no cache can remove.
+
+### Three checks that the numbers are real
+
+Each of these could have invalidated the result, and each was run rather than
+argued:
+
+1. **Is the load generator the bottleneck?** It sustained 200 req/s at p50
+   3.07 ms with no errors. At 50 req/s it is nowhere near its limit, so the
+   figures describe the server.
+2. **Is the tail just connection-pool queueing?** Quadrupling the pool
+   (`DB_POOL_SIZE` 5 → 20) moved p95 from 63.90 ms to 63.61 ms — inside the
+   run-to-run range. The tail is genuine PostGIS work, not contention.
+3. **Is the harness internally consistent?** A cold request does identical
+   database work to an uncached one plus a cheap Redis write, so the two must
+   coincide. They do: p50 8.52 vs 7.80 ms, p95 63.53 vs 63.90 ms.
+
+### What it measures, and what it does not
+
+**The floor dominates the median.** The control costs 5.03 ms at p50, against
+7.80 ms uncached and 6.14 ms warm. Subtract it and the spatial query is ~2.8 ms
+while a cache hit is ~1.1 ms — the cache saves 1.66 ms at the median, which is
+close to nothing. This is the opposite of the story a serving tier is usually
+sold with, and it is the measured one.
+
+**A caveat that cuts against the flattering reading.** `/ping` returns a tiny
+body while `/area` returns up to ~20 breakdown entries, so the floor excludes
+response serialisation and is a *lower bound* on overhead. The true non-query
+cost is higher, which makes "caching barely helps the median" stronger.
+
+**The percentage depends on which framing is chosen, so both are stated.**
+Raw p95 falls 63.90 → 9.20 ms, an 85.6% reduction. With the floor subtracted
+that is 56.35 → 1.65 ms, 97% of the server's tail work removed. The first is
+what a caller experiences; the second is what the cache actually did. Quoting
+only the second would be flattery.
+
+**And both of those describe a 100% hit rate, which is not a result.** The
+warm phase hits on every request; no real workload does. Because p95 *is* the
+percentile where misses live, the honest measurement is a mixed one, so the
+benchmark drives a stated hit rate:
+
+| Phase | Hit rate | p50 | p95 | p99 |
+|---|---|---|---|---|
+| Baseline (control) | — | 5.03 ms | 7.55 ms | 9.1 ms |
+| Uncached | — | 7.80 ms | 63.90 ms | 220.5 ms |
+| Cold | 0% | 8.52 ms | 63.53 ms | 223.0 ms |
+| Mixed | 50% | 7.30 ms | 23.98 ms | not reported |
+| Mixed | 90% | 7.49 ms | 12.81 ms | not reported |
+| Warm | 100% | 6.14 ms | 9.20 ms | 9.8 ms |
+
+p95 improves smoothly with hit rate — 63.9 → 24.0 → 12.8 → 9.2 ms — so **the
+figure worth quoting is the 50% one: a 62% lower p95** at a hit rate a real
+workload might actually reach. The median hardly moves at any hit rate, because
+the median was never the problem.
+
+**Why the mixed rows report no p99.** Warm and cold polygons are split by index,
+so at a 90% hit rate only 30 distinct polygons are ever missed and whether a
+pathologically slow one falls in that subset is luck. p95 is stable across runs
+(12.44–16.69 ms); p99 would be an artifact of the split. A stratified or random
+split would fix this and has not been done.
+
+**The distribution is heavy-tailed, which is the real finding.** Uncached p99 is
+220 ms and the slowest single request observed was 616 ms, against a 7.8 ms
+median — nearly two orders of magnitude. A small number of polygons touch enough
+map units to cost vastly more than a typical one. **Which polygons, and why, is
+not measured.** That is the obvious next investigation, and it rhymes with the
+unexplained block 92 of the Indiana join (§5.5): in both cases a small subset of
+the workload dominates the total, and in neither case does anything yet count
+what makes those cases different.
+

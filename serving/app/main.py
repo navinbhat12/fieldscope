@@ -60,6 +60,21 @@ def health() -> dict:
     return {"status": "ok", "overlay_rows": rows, "cache": cache.stats()}
 
 
+@app.post("/ping")
+def ping(req: AreaRequest) -> dict:
+    """Benchmark control. Does no work; exists to be subtracted.
+
+    Takes the same request body as /area and returns immediately, so a
+    benchmark run against it measures everything /area pays that is not the
+    query: HTTP, the ASGI server, Pydantic validation of the polygon, JSON
+    serialisation, and -- on a development Mac -- Docker's port forwarding.
+    Without this floor, any claim about what caching saves is unfounded,
+    because the measured difference could be dominated by transport that no
+    amount of caching can remove.
+    """
+    return {"ok": True, "vertices": len(req.geometry.coordinates[0])}
+
+
 @app.get("/mapunit/{mukey}", response_model=MapUnitResponse)
 def mapunit(mukey: str) -> MapUnitResponse:
     """Everything known about one soil map unit."""

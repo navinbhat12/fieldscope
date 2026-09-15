@@ -135,6 +135,91 @@ have not been isolated and measured, so no per-fix speedup is claimed:
    to soil polygons, which are orders of magnitude finer than drought regions
    anyway.
 
+## Serving
+
+The API answers two questions against the precomputed overlay, and neither
+recomputes the join:
+
+| Endpoint | What it does |
+|---|---|
+| `GET /mapunit/{mukey}` | One soil map unit's land cover breakdown — an indexed lookup. |
+| `POST /area` | Takes a drawn GeoJSON polygon, finds the map units it touches through a GiST index, and aggregates their precomputed rows weighted by intersected area. |
+
+`POST /area` returns an estimate and says so in its own response: the batch join
+collapsed pixel locations into per-map-unit totals, so a field covering 30% of a
+map unit reports 30% of that unit's land cover. That is exact only if land cover
+is uniform within the unit, which it is not — recovering the true answer would
+mean putting the raster back in the request path, which is the thing the whole
+design exists to avoid.
+
+```bash
+docker compose up -d
+docker compose run --rm api python scripts/load_serving.py   # ~2.3 min
+curl -X POST localhost:8000/area -H 'Content-Type: application/json' \
+     -d '{"geometry": {"type": "Polygon", "coordinates": [[...]]}}'
+```
+
+### Measured latency
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/benchmark-dark.svg">
+  <img alt="POST /area latency by cache state: p50 and p95 for a no-op control, uncached, cold cache and warm cache, at 50 requests per second" src="docs/img/benchmark-light.svg">
+</picture>
+
+**This is a benchmark under synthetic load, not production traffic** — this
+service has no users, and a latency figure presented as production behaviour
+would be false. The method is in the figure: a fixed, committed set of 300
+field-sized polygons, open-loop at a stated rate, five runs with the first
+discarded, and the observed range reported beside every median.
+
+| Phase | p50 | p95 | p99 |
+|---|---|---|---|
+| Baseline — `POST /ping`, no work done | 5.03 ms | 7.55 ms | 9.1 ms |
+| Uncached — straight to PostGIS | 7.80 ms | 63.90 ms | 220.5 ms |
+| Cold cache — 0% hit | 8.52 ms | 63.53 ms | 223.0 ms |
+| Mixed — 50% hit | 7.30 ms | 23.98 ms | — |
+| Mixed — 90% hit | 7.49 ms | 12.81 ms | — |
+| Warm cache — 100% hit | 6.14 ms | 9.20 ms | 9.8 ms |
+
+**The control row is the point.** A no-op endpoint taking the identical request
+body costs 5.03 ms at p50, so most of what every other row shows is HTTP,
+Pydantic validation and Docker's networking — not the query. Subtract it and
+the spatial query costs about **2.8 ms** at the median against **1.1 ms** for a
+cache hit. The cache saves 1.66 ms there, which is close to nothing.
+
+**Its value is entirely in the tail, and scales with the hit rate.** p95 runs
+63.9 → 24.0 → 12.8 → 9.2 ms as the hit rate goes 0 → 50 → 90 → 100%. The
+100%-hit row is a ceiling rather than a result — no real workload hits on every
+request — so **the number worth quoting is the 50% one: a 62% lower p95**.
+
+**The distribution is heavy-tailed.** Uncached p99 is 220 ms and the slowest
+single request observed was 616 ms, against a 7.8 ms median. A small number of
+polygons touch enough map units to cost two orders of magnitude more than a
+typical one. Which polygons, and why, is not yet measured.
+
+Two checks make these trustworthy rather than merely plausible. The load
+generator sustains 200 req/s at p50 3.07 ms, so at 50 req/s it is not the
+constraint. And quadrupling the connection pool moved p95 by 0.3 ms, so the
+tail is real query cost, not requests queueing for a connection.
+
+Two caveats, stated rather than buried. `/ping` returns a tiny body while
+`/area` returns up to ~20 breakdown entries, so the floor excludes response
+serialization and is a *lower bound* on overhead — which makes the "caching
+barely helps the median" finding stronger, not weaker. And the mixed rows split
+warm from cold by index, so which polygons land in the miss set is arbitrary;
+their p95 is stable across runs but their p99 is not reported, because at a 90%
+hit rate only 30 distinct polygons are ever missed.
+
+These are laptop numbers. The deploy target is a shared-vCPU e2-micro with ~1 GB
+of RAM, which is a different machine entirely; the figures that belong next to a
+deployed link are the ones measured on the box that serves it.
+
+Reproduce with:
+
+```bash
+.venv/bin/python scripts/benchmark_serving.py --phase warm --rate 50 --requests 300
+```
+
 ## Data sources
 
 All public, federal, and actively maintained. No synthetic data anywhere in
@@ -242,8 +327,12 @@ Three things that cost real debugging time, recorded so they cost it once:
 - [x] Spark + Sedona distributed join, validated against single-machine truth
 - [x] Indiana inputs acquired — 104,126,688 land cover records, 1,341,119 soil polygons
 - [x] A join strategy that survives state scale, verified on county data
-- [ ] The Indiana run itself
-- [ ] Serving store
-- [ ] Edge API and latency benchmarking
+- [x] The Indiana run itself — 104,125,537 records joined, 155,025 rows out
+- [x] Serving store — PostgreSQL + PostGIS, 1.48M soil polygons loaded and indexed
+- [x] API — `GET /mapunit/{mukey}` and `POST /area` over the precomputed overlay
+- [x] Redis read-through cache, keyed by the normalised polygon
+- [x] Latency benchmarking under stated synthetic load
+- [ ] Deploy — GCP e2-micro behind a Cloudflare Tunnel
 - [ ] Map frontend
+- [ ] More states, so the drought layer has something to show
 - [ ] Scheduled weekly refresh of the drought layer

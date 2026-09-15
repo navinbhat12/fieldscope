@@ -66,6 +66,10 @@ services:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-fieldscope}:${POSTGRES_PASSWORD:-fieldscope}@db:5432/${POSTGRES_DB:-fieldscope}
       REDIS_URL: redis://cache:6379/0
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # The benchmark restarts the API with this at 0 to measure the
+      # uncached path against the same running service.
+      CACHE_ENABLED: ${CACHE_ENABLED:-1}
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-5}
     ports:
       - "${API_PORT:-8000}:8000"
     # The loader runs in this same image (it needs psycopg and pyarrow, which

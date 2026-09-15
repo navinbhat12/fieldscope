@@ -32,6 +32,12 @@ class Settings:
     # same running service, rather than inferring it from a cold cache.
     cache_enabled: bool = True
 
+    # Exposed so the benchmark can test whether the p95 tail is query cost or
+    # simply requests queueing for a connection. Small by default: each
+    # Postgres backend costs memory, and the deploy target has ~1 GB for the
+    # database, the cache and this service together.
+    db_pool_size: int = 5
+
 
 def load_settings() -> Settings:
     return Settings(
@@ -43,4 +49,5 @@ def load_settings() -> Settings:
         max_query_acres=float(os.environ.get("MAX_QUERY_ACRES", 100_000)),
         coord_precision=int(os.environ.get("COORD_PRECISION", 6)),
         cache_enabled=os.environ.get("CACHE_ENABLED", "1") not in ("0", "false", "False"),
+        db_pool_size=int(os.environ.get("DB_POOL_SIZE", 5)),
     )

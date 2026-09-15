@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="940" height="660" viewBox="0 0 940 660" font-family="ui-sans-serif, -apple-system, Segoe UI, Helvetica, Arial, sans-serif" role="img" aria-label="POST /area latency by cache state">
+<rect width="940" height="660" fill="#fcfcfb"/>
+<text x="32" y="44" font-size="19" font-weight="600" fill="#0b0b0b">What the cache is worth depends on the hit rate</text>
+<text x="32" y="68" font-size="13" fill="#52514e">POST /area latency by cache state, against a no-op control — 50 req/s synthetic load</text>
+<rect x="32" y="88" width="11" height="11" rx="2.5" fill="#2a78d6"/>
+<text x="49" y="98" font-size="12" fill="#52514e">p50 (median)</text>
+<rect x="133.2" y="88" width="11" height="11" rx="2.5" fill="#eb6834"/>
+<text x="150.2" y="98" font-size="12" fill="#52514e">p95 (tail)</text>
+<line x1="232.0" y1="128" x2="232.0" y2="536" stroke="#e4e3df" stroke-width="1"/>
+<text x="232.0" y="554" font-size="11" fill="#52514e" text-anchor="middle">0</text>
+<line x1="356.5" y1="128" x2="356.5" y2="536" stroke="#e4e3df" stroke-width="1"/>
+<text x="356.5" y="554" font-size="11" fill="#52514e" text-anchor="middle">20</text>
+<line x1="481.0" y1="128" x2="481.0" y2="536" stroke="#e4e3df" stroke-width="1"/>
+<text x="481.0" y="554" font-size="11" fill="#52514e" text-anchor="middle">40</text>
+<line x1="605.5" y1="128" x2="605.5" y2="536" stroke="#e4e3df" stroke-width="1"/>
+<text x="605.5" y="554" font-size="11" fill="#52514e" text-anchor="middle">60</text>
+<line x1="730.0" y1="128" x2="730.0" y2="536" stroke="#e4e3df" stroke-width="1"/>
+<text x="730.0" y="554" font-size="11" fill="#52514e" text-anchor="middle">80</text>
+<text x="481" y="578" font-size="11.5" fill="#52514e" text-anchor="middle">milliseconds</text>
+<text x="212" y="165" font-size="13.5" font-weight="600" fill="#0b0b0b" text-anchor="end">Baseline (control)</text>
+<text x="212" y="182" font-size="11" fill="#52514e" text-anchor="end">POST /ping — server does no work</text>
+<path d="M232 150.0 H259.3 a4 4 0 0 1 4 4 V164.0 a4 4 0 0 1 -4 4 H232 Z" fill="#2a78d6"/>
+<text x="273.3" y="162.0" font-size="12" fill="#0b0b0b" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">5.0<tspan fill="#52514e" font-size="10.5"> (4.8–5.1)</tspan></text>
+<path d="M232 170.0 H275.0 a4 4 0 0 1 4 4 V184.0 a4 4 0 0 1 -4 4 H232 Z" fill="#eb6834"/>
+<text x="289.0" y="182.0" font-size="12" fill="#0b0b0b" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">7.5<tspan fill="#52514e" font-size="10.5"> (7.2–7.9)</tspan></text>
+<text x="212" y="231" font-size="13.5" font-weight="600" fill="#0b0b0b" text-anchor="end">Uncached</text>
+<text x="212" y="248" font-size="11" fill="#52514e" text-anchor="end">cache off — straight to PostGIS</text>
+<path d="M232 216.0 H276.6 a4 4 0 0 1 4 4 V230.0 a4 4 0 0 1 -4 4 H232 Z" fill="#2a78d6"/>
+<text x="290.6" y="228.0" font-size="12" fill="#0b0b0b" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">7.8<tspan fill="#52514e" font-size="10.5"> (7.8–7.9)</tspan></text>
+<path d="M232 236.0 H625.8 a4 4 0 0 1 4 4 V250.0 a4 4 0 0 1 -4 4 H232 Z" fill="#eb6834"/>
+<text x="639.8" y="248.0" font-size="12" fill="#0b0b0b" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">63.9<tspan fill="#52514e" font-size="10.5"> (62.2–65.6)</tspan></text>
+<text x="212" y="297" font-size="13.5" font-weight="600" fill="#0b0b0b" text-anchor="end">Cold cache</text>
+<text x="212" y="314" font-size="11" fill="#52514e" text-anchor="end">0% hit — every request a miss</text>
+<path d="M232 282.0 H281.0 a4 4 0 0 1 4 4 V296.0 a4 4 0 0 1 -4 4 H232 Z" fill="#2a78d6"/>
+<text x="295.0" y="294.0" font-size="12" fill="#0b0b0b" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">8.5<tspan fill="#52514e" font-size="10.5"> (8.3–8.9)</tspan></text>
+<path d="M232 302.0 H623.5 a4 4 0 0 1 4 4 V316.0 a4 4 0 0 1 -4 4 H232 Z" fill="#eb6834"/>
+<text x="637.5" y="314.0" font-size="12" fill="#0b0b0b" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">63.5<tspan fill="#52514e" font-size="10.5"> (61.9–63.6)</tspan></text>
+<text x="212" y="363" font-size="13.5" font-weight="600" fill="#0b0b0b" text-anchor="end">Mixed load</text>
+<text x="212" y="380" font-size="11" fill="#52514e" text-anchor="end">50% hit rate</text>
+<path d="M232 348.0 H273.4 a4 4 0 0 1 4 4 V362.0 a4 4 0 0 1 -4 4 H232 Z" fill="#2a78d6"/>
+<text x="287.4" y="360.0" font-size="12" fill="#0b0b0b" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">7.3<tspan fill="#52514e" font-size="10.5"> (7.1–7.7)</tspan></text>
+<path d="M232 368.0 H377.3 a4 4 0 0 1 4 4 V382.0 a4 4 0 0 1 -4 4 H232 Z" fill="#eb6834"/>
+<text x="391.3" y="380.0" font-size="12" fill="#0b0b0b" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">24.0<tspan fill="#52514e" font-size="10.5"> (23.4–31.4)</tspan></text>
+<text x="212" y="429" font-size="13.5" font-weight="600" fill="#0b0b0b" text-anchor="end">Mixed load</text>
+<text x="212" y="446" font-size="11" fill="#52514e" text-anchor="end">90% hit rate</text>
+<path d="M232 414.0 H274.6 a4 4 0 0 1 4 4 V428.0 a4 4 0 0 1 -4 4 H232 Z" fill="#2a78d6"/>
+<text x="288.6" y="426.0" font-size="12" fill="#0b0b0b" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">7.5<tspan fill="#52514e" font-size="10.5"> (5.6–7.7)</tspan></text>
+<path d="M232 434.0 H307.7 a4 4 0 0 1 4 4 V448.0 a4 4 0 0 1 -4 4 H232 Z" fill="#eb6834"/>
+<text x="321.7" y="446.0" font-size="12" fill="#0b0b0b" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">12.8<tspan fill="#52514e" font-size="10.5"> (12.4–16.7)</tspan></text>
+<text x="212" y="495" font-size="13.5" font-weight="600" fill="#0b0b0b" text-anchor="end">Warm cache</text>
+<text x="212" y="512" font-size="11" fill="#52514e" text-anchor="end">100% hit — a ceiling, not a result</text>
+<path d="M232 480.0 H266.2 a4 4 0 0 1 4 4 V494.0 a4 4 0 0 1 -4 4 H232 Z" fill="#2a78d6"/>
+<text x="280.2" y="492.0" font-size="12" fill="#0b0b0b" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">6.1<tspan fill="#52514e" font-size="10.5"> (6.0–6.3)</tspan></text>
+<path d="M232 500.0 H285.3 a4 4 0 0 1 4 4 V514.0 a4 4 0 0 1 -4 4 H232 Z" fill="#eb6834"/>
+<text x="299.3" y="512.0" font-size="12" fill="#0b0b0b" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">9.2<tspan fill="#52514e" font-size="10.5"> (8.9–9.3)</tspan></text>
+<text x="32" y="606" font-size="10.5" fill="#52514e">Method: 300 requests per run over a fixed set of 300 field-sized polygons, open-loop at 50 req/s; 5 runs, first discarded; bars</text>
+<text x="32" y="620" font-size="10.5" fill="#52514e">are the median of per-run values, parentheses the observed range across runs.</text>
+<text x="32" y="638" font-size="10.5" fill="#52514e">Synthetic load against a local Docker Compose stack — not production traffic; this service has no users. Apple M2 Pro, 10 cores,</text>
+<text x="32" y="652" font-size="10.5" fill="#52514e">17.2 GB. PostgreSQL 16 / PostGIS 3.4, Redis 7.</text>
+</svg>
