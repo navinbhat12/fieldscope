@@ -25,14 +25,20 @@ Crop cover is a uniform 30-meter grid. Drought severity is a handful of
 country-sized shapes. Answering "what is under this field" means reconciling
 all three geometrically.
 
-Doing that per request is far too slow to serve interactively. So the work is
-split: an expensive offline join runs on Spark and collapses the answer into a
-compact lookup table, and the online API only ever does key lookups against
-that precomputed result.
+So the interesting work happens before anyone asks a question. An offline job
+on Spark reconciles all three layers once — projecting them into a common
+equal-area grid, resolving which soil polygon every 30-metre pixel falls in,
+and collapsing 104 million records into 155,025 rows that say what grows on
+each soil map unit. That output is the product. The API on top of it is
+deliberately boring: find the map units a drawn polygon touches, look up rows
+that already exist, add them up.
 
-This batch/serving split is the core design decision — the heavy computation
-and the low-latency serving path have completely different scaling
-characteristics and are deliberately decoupled.
+This is the core design decision, and the split is the point. The expensive
+half runs on a schedule, takes as long as it takes, and is re-run when the crop
+layer refreshes. The live half never recomputes any of it, so it answers in
+milliseconds without needing to be clever. Most of the engineering here went
+into making the precomputed layer trustworthy enough that the serving path can
+afford to be that simple.
 
 **[docs/DESIGN.md](docs/DESIGN.md)** records each decision with the constraint
 that forced it, the alternatives considered, and the measured consequence —
