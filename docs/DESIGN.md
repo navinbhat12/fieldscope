@@ -191,10 +191,24 @@ polygon is 0.0136 km². The approximation is six orders of magnitude below the
 resolution of the layer being approximated. Taking the worse class on a
 straddle is the conservative direction for a risk overlay.
 
-**Consequence.** This also makes the weekly refresh cheap: only the
-polygon→drought mapping has to be recomputed, not the full per-pixel join.
-An approximation made for performance turned out to define the incremental
-update path.
+**Consequence.** This also makes a weekly refresh cheap *in principle*: only
+the polygon→drought mapping would have to be recomputed, not the full per-pixel
+join. An approximation made for performance turned out to define the
+incremental update path.
+
+**In principle, because the code does not take that path — and does not need
+to.** `run_join.py` attaches drought to polygons before the pixel join and then
+carries `drought_class` into the final `groupBy`, so today a drought change
+means re-running the whole job. Making it incremental means aggregating to
+`(polygon, crop_code)` and joining drought on afterwards, turning a ~100-minute
+job over 455M pixels into a seconds-long join over 484K rows.
+
+**Descoped 2026-09-15.** Navin confirmed the demo does not need a weekly
+refresh, so neither the cron job nor this reordering is being built. The
+reasoning is kept because it is the correct fix if the requirement ever
+returns, and because the drought layer is still a genuine part of the output —
+it is simply a snapshot of one USDM week rather than a moving layer. Label it
+as that week in the UI.
 
 ### 5.5 Join strategy at state scale — grid chunking
 
@@ -739,7 +753,7 @@ repository cites that, the sample size, and the hardware.
 | 5c | Deploy to GCP behind Cloudflare Tunnel (§5.11) | **next** |
 | 5d | Terraform, CI — optional, not blocking (§5.11) | stretch |
 | 6 | Map frontend, public demo — needs §5.9 first | open |
-| 7 | Scheduled weekly drought refresh (cheap, by §5.4) | stretch |
+| 7 | Scheduled weekly drought refresh | ~~stretch~~ descoped 2026-09-15 (§5.4) |
 
 Milestone 3 is the load-bearing one: it is where the broadcast strategy of §5.3
 stops working and the join has to become genuinely distributed. It also settles
