@@ -629,6 +629,39 @@ compromise the line above called it.
 `overlay` table is 15 MB per state and holds every acre figure the API reports;
 `soil_polygon` exists only to resolve a drawn polygon to a set of map units.
 
+**That last claim is too comfortable, and the measurement says so — OPEN.**
+Simplification does reach the answers, by two paths. Over the same 40,000
+polygons, at a 30 m tolerance:
+
+| | |
+|---|---|
+| Net area bias | **−1.07%** (simplified polygons are smaller) |
+| Mean absolute error | 3.58% of total area |
+| Worst single polygon | 83.8% |
+
+The worst case is the expected one — a polygon not much wider than the
+tolerance has little left to preserve — but the paths into `POST /area` matter
+more than the distribution:
+
+- `mukey_area.total_m2` is built as `SUM(ST_Area(geom))` over this very table,
+  and it is the **denominator** `/area` divides by.
+- The **numerator** is the intersection of the drawn polygon against the same
+  geometry.
+
+So both sides of the fraction move together and the errors partly cancel, which
+is a better position than it first appears — and it argues *against* the obvious
+fix. Storing an exact raw area as the denominator while intersecting simplified
+geometry for the numerator would stop the cancellation and bias every fraction
+low by roughly a percent. Self-consistent geometry beats a half-exact ratio.
+
+**What is actually unmeasured is the thing that matters:** the change in the
+`fraction` each request returns, rather than the change in area. The check is
+cheap and specific — run the benchmark's 300 polygons through `/area` against
+raw and simplified geometry and compare the returned acreage per map unit. Do
+that before the simplified table is quoted anywhere. Until then `--simplify 0`
+loads the geometry as surveyed, and the default of 30 is a deploy convenience
+justified by RAM, not yet by accuracy.
+
 **Deliberately excluded.** Recorded because the reasons are the point:
 
 - **Kafka** — the only recurring input is a weekly drought refresh (§5.4).

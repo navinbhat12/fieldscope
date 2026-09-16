@@ -98,12 +98,19 @@ def load_overlay(conn: psycopg.Connection, parquet: Path) -> int:
     return rows
 
 
-def load_soil(conn: psycopg.Connection, parquet: Path, chunk: int) -> int:
+def load_soil(conn: psycopg.Connection, parquet: Path, chunk: int,
+              simplify: float = 0.0) -> int:
     """The slow one: stream WKB in, reproject to 5070, keep disk flat.
 
     Each chunk is copied into an unlogged staging table, transformed into
     soil_polygon, then the staging table is truncated -- so peak disk is one
     chunk rather than a second full copy of a 2 GB table.
+
+    `simplify` is a tolerance in metres, applied after the reprojection so the
+    unit means something. 30 m leaves 18.8% of the bytes and is the default for
+    a deploy, because the crop layer is a 30 m grid: a soil boundary resolved
+    more finely than one CDL pixel cannot change an answer this API returns.
+    Pass 0 to load the geometry as surveyed (§5.11).
     """
     log(f"soil: reading {parquet.name} (this is the slow step)")
     dataset = ds.dataset(parquet, format="parquet")
@@ -130,7 +137,19 @@ def load_soil(conn: psycopg.Connection, parquet: Path, chunk: int) -> int:
     # ST_MakeValid runs only where needed: SSURGO is mostly clean, and an
     # invalid polygon reaching ST_Intersection at request time would fail the
     # request rather than return a wrong answer.
-    transform = """
+    # Simplification wraps the reprojection rather than replacing it: the
+    # tolerance is in metres, so it has to be applied in 5070 and not in
+    # degrees. ST_MakeValid still runs afterwards -- SimplifyPreserveTopology
+    # keeps a ring from crossing itself but says nothing about the
+    # multipolygon it sits in.
+    projected = "ST_Transform(ST_SetSRID(ST_GeomFromWKB(wkb), 4326), 5070)"
+    if simplify > 0:
+        projected = f"ST_SimplifyPreserveTopology({projected}, {simplify})"
+        log(f"soil: simplifying to a {simplify:g} m tolerance as it loads")
+    else:
+        log("soil: loading geometry as surveyed, no simplification")
+
+    transform = f"""
         INSERT INTO soil_polygon (mukey, geom)
         SELECT mukey,
                ST_Multi(
@@ -138,8 +157,7 @@ def load_soil(conn: psycopg.Connection, parquet: Path, chunk: int) -> int:
                         ELSE ST_CollectionExtract(ST_MakeValid(g), 3) END
                )
         FROM (
-            SELECT mukey,
-                   ST_Transform(ST_SetSRID(ST_GeomFromWKB(wkb), 4326), 5070) AS g
+            SELECT mukey, {projected} AS g
             FROM _soil_raw
         ) s
         WHERE NOT ST_IsEmpty(g)
@@ -221,6 +239,14 @@ def main() -> None:
         default=100_000,
         help="Polygons staged before each transform pass.",
     )
+    ap.add_argument(
+        "--simplify",
+        type=float,
+        default=30.0,
+        metavar="METRES",
+        help="Simplify served geometry to this tolerance; 0 loads it as "
+             "surveyed. Default 30, the CDL pixel size (§5.11).",
+    )
     args = ap.parse_args()
 
     overlay_path = DATA / "processed" / f"overlay_{args.aoi}.parquet"
@@ -241,7 +267,7 @@ def main() -> None:
             conn.commit()
             load_overlay(conn, overlay_path)
         if args.only in ("all", "soil"):
-            load_soil(conn, soil_path, args.chunk)
+            load_soil(conn, soil_path, args.chunk, args.simplify)
             build_mukey_area(conn)
 
         log("building indexes (GiST over the soil geometry is the slow one)")
