@@ -1,0 +1,42 @@
+# Deploy overrides for the GCP e2-micro (docs/DESIGN.md §5.11).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.vm.yml up -d
+#
+# Two differences from the local stack, both consequences of the host being
+# reachable from the internet rather than being a laptop.
+#
+# Every ports/volumes key here carries !override. Compose merges sequences by
+# appending, so without it the base file's "5432:5432" survives alongside the
+# loopback binding -- the two collide on the same port, and if they did not,
+# the database would still be published on every interface while the file
+# claimed otherwise.
+
+services:
+  db:
+    # Bind to loopback. The base file publishes 5432 on every interface, which
+    # is harmless behind a laptop's NAT and is not harmless on a host with a
+    # public address. GCP's default firewall does block it, but a database
+    # reachable only because of a firewall rule someone else owns is one
+    # console click from being exposed.
+    ports: !override
+      - "127.0.0.1:5432:5432"
+    # A portfolio link has to survive a VM reboot without anyone noticing.
+    restart: unless-stopped
+
+  cache:
+    ports: !override
+      - "127.0.0.1:6379:6379"
+    restart: unless-stopped
+
+  api:
+    # Also loopback: the only thing that should reach the API is cloudflared,
+    # which runs on this host and dials out. Nothing here needs an inbound
+    # port, which is what lets the external IP be removed after setup.
+    ports: !override
+      - "127.0.0.1:8000:8000"
+    # The VM restores from a pg_dump instead of running the loader, so the
+    # multi-GB data directory is never copied up and must not be mounted.
+    # scripts/ still mounts, for the benchmark harness.
+    volumes: !override
+      - ./scripts:/app/scripts:ro
+    restart: unless-stopped
