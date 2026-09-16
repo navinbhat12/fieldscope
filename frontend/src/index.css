@@ -1,0 +1,55 @@
+@import 'tailwindcss';
+
+/* The palette is lifted from docs/cache-benchmark.html rather than invented,
+   so the figure in the README and the live demo read as one product. Warm
+   near-black instead of blue-black, because the map underneath is mostly
+   greens and browns and a cold shell fights it. */
+@theme {
+  --color-bg: #0f0e0d;
+  --color-card: #191817;
+  --color-ink: #f6f3ec;
+  --color-ink-2: #cdc8bd;
+  --color-muted: #918c82;
+  --color-rule: #2c2926;
+  --color-accent: #3987e5;
+  /* Reserved status steps, distinct from the categorical series colours so a
+     finding never impersonates a land cover class. Always shipped beside
+     text, never carrying meaning on their own. */
+  --color-note: #fab219;
+  --color-caution: #ec835a;
+  --color-warn: #e8632c;
+  --color-good: #2bb98a;
+
+  --font-sans: 'IBM Plex Sans', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Numbers in a readout must not jitter as they change. */
+.tabular {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* MapLibre ships a light-themed UI; restyle rather than accept it. */
+.maplibregl-ctrl-attrib {
+  background: rgb(15 14 13 / 0.7) !important;
+  color: var(--color-muted) !important;
+  font-size: 10px !important;
+}
+.maplibregl-ctrl-attrib a {
+  color: var(--color-ink-2) !important;
+}

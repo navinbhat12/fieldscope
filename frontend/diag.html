@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" /><meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Fieldscope diagnostics</title>
+<style>
+  html,body{height:100%}
+  body{margin:0;background:#0f0e0d;color:#f6f3ec;
+       font:12.5px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;padding:16px;
+       display:flex;gap:16px}
+  #log{white-space:pre-wrap;word-break:break-word;flex:1;overflow:auto}
+  .ok{color:#2bb98a}.bad{color:#e8632c}.dim{color:#918c82}.hd{color:#f6f3ec;font-weight:600}
+  iframe{width:760px;height:620px;border:1px solid #2c2926;border-radius:8px;background:#000;flex:none}
+</style>
+</head>
+<body>
+<div id="log"></div>
+<script type="module">
+const el = document.getElementById('log')
+const put=(c,m)=>{const s=document.createElement('span');s.className=c;s.textContent=m+'\n';el.appendChild(s)}
+const ok=m=>put('ok','  OK    '+m), bad=m=>put('bad','  FAIL  '+m)
+const info=m=>put('dim','        '+m), head=m=>put('hd','\n'+m)
+
+window.addEventListener('error',e=>bad(`harness error: ${e.message} @ ${e.filename}:${e.lineno}`))
+window.addEventListener('unhandledrejection',e=>bad('harness rejection: '+(e.reason?.stack||e.reason?.message||e.reason)))
+
+head('1. MapLibre module (correct .mjs entry this time)')
+let ml=null
+try{
+  ml=await import('maplibre-gl')
+  ok('maplibre-gl imported as a bare specifier')
+  info(`Map=${typeof ml.Map} MapLibreMap=${typeof ml.MapLibreMap} version=${ml.getVersion?.()??'?'}`)
+}catch(err){ bad('import failed: '+(err?.message||err)) }
+
+head('2. Does a bare MapLibre map render? (no React involved)')
+if(ml){
+  const box=document.createElement('div')
+  box.style.cssText='position:fixed;left:-9999px;top:0;width:600px;height:400px'
+  document.body.appendChild(box)
+  await new Promise(res=>{
+    let done=false
+    const fin=(f,m)=>{if(!done){done=true;f(m);res()}}
+    try{
+      const m=new ml.MapLibreMap({container:box,style:'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
+        center:[-119.6,36.9],zoom:5})
+      m.on('load',()=>fin(ok,'bare map fired "load" — MapLibre itself is fine'))
+      m.on('error',e=>info('  map error event: '+(e.error?.message||'unknown')))
+      setTimeout(()=>fin(bad,'bare map never loaded in 15s'),15000)
+    }catch(err){ fin(bad,'Map constructor threw: '+(err?.message||err)) }
+  })
+}
+
+head('3. The real app, loaded exactly as you load it')
+const f=document.createElement('iframe')
+document.body.appendChild(f)
+let hooked=false
+const hook=setInterval(()=>{
+  try{
+    const w=f.contentWindow
+    if(w&&!hooked){
+      hooked=true
+      w.addEventListener('error',e=>bad(`APP ERROR: ${e.message}  @ ${e.filename}:${e.lineno}:${e.colno}`))
+      w.addEventListener('unhandledrejection',e=>bad('APP REJECTION: '+(e.reason?.stack||e.reason?.message||e.reason)))
+      const ce=w.console.error.bind(w.console)
+      w.console.error=(...a)=>{bad('APP console.error: '+a.map(x=>x?.stack||x?.message||String(x)).join(' ').slice(0,400));ce(...a)}
+    }
+  }catch{}
+},5)
+f.src='/'
+await new Promise(res=>{ f.onload=res; setTimeout(res,10000) })
+await new Promise(r=>setTimeout(r,4000))
+clearInterval(hook)
+
+try{
+  const d=f.contentDocument
+  const root=d.getElementById('root')
+  if(!root){ bad('#root does not exist in the app document') }
+  else{
+    const kids=root.children.length
+    kids>0?ok(`#root has ${kids} child element(s) — React mounted`)
+          :bad('#root is EMPTY — React never mounted or threw during render')
+    const rr=root.getBoundingClientRect()
+    info(`#root box: ${Math.round(rr.width)} x ${Math.round(rr.height)} px`)
+    if(kids>0){
+      const first=root.firstElementChild
+      const br=first.getBoundingClientRect(), cs=d.defaultView.getComputedStyle(first)
+      info(`app div : ${Math.round(br.width)} x ${Math.round(br.height)} px  position=${cs.position} overflow=${cs.overflow}`)
+      const cv=root.querySelector('canvas')
+      if(!cv) bad('no <canvas> — the map never initialised')
+      else{
+        const cr=cv.getBoundingClientRect()
+        const dpr=f.contentWindow.devicePixelRatio||1
+        const cssW=Math.round(cr.width), cssH=Math.round(cr.height)
+        const contW=Math.round(br.width), contH=Math.round(br.height)
+        info(`canvas backing : ${cv.width} x ${cv.height} (dpr ${dpr})`)
+        info(`canvas CSS     : ${cssW} x ${cssH}`)
+        info(`container      : ${contW} x ${contH}`)
+        const fits = Math.abs(cssW-contW)<=2 && Math.abs(cssH-contH)<=2
+        fits ? ok('canvas fills its container — sizing is correct')
+             : bad(`canvas does NOT match container (off by ${contW-cssW} x ${contH-cssH})`)
+        const ccs=d.defaultView.getComputedStyle(cv)
+        info(`canvas style   : display=${ccs.display} visibility=${ccs.visibility} opacity=${ccs.opacity}`)
+        // Did maplibre-gl.css actually load? Its .maplibregl-map rule sets overflow:hidden.
+        const mlMap=root.querySelector('.maplibregl-map')
+        if(mlMap){
+          const ms=d.defaultView.getComputedStyle(mlMap)
+          const mr=mlMap.getBoundingClientRect()
+          ms.overflow==='hidden' ? ok('maplibre-gl.css is applied')
+                                 : bad('maplibre-gl.css does NOT appear to be applied')
+          info(`map container : ${Math.round(mr.width)} x ${Math.round(mr.height)} px, position=${ms.position}`)
+          ms.position==='absolute' ? ok('container kept position:absolute (layer conflict resolved)')
+                                   : bad(`container position is ${ms.position} — maplibre-gl.css overrode it`)
+          Math.round(mr.height)>0 ? ok('container has non-zero height')
+                                  : bad('container height is 0 — MapLibre will fall back to 300px')
+        } else bad('no .maplibregl-map element')
+        info(`tile <img>/canvas layers: ${root.querySelectorAll('canvas').length}`)
+      }
+      const btns=root.querySelectorAll('button').length
+      info(`buttons in app: ${btns}`)
+      const txt=(root.textContent||'').replace(/\s+/g,' ').trim()
+      info('visible text: '+(txt?txt.slice(0,200):'(NONE)'))
+      const tw=d.querySelector('h1')
+      info('h1 present: '+(tw?JSON.stringify(tw.textContent):'no'))
+    }
+  }
+  const styles=d.querySelectorAll('style,link[rel=stylesheet]').length
+  info(`stylesheets in app document: ${styles}`)
+}catch(err){ bad('could not inspect the app: '+(err?.message||err)) }
+
+head('Done. Copy everything above.')
+</script>
+</body>
+</html>
