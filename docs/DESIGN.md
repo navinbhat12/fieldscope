@@ -467,9 +467,30 @@ unusually polygon-dense farmland county, which is the same species of
 unmeasured extrapolation that had already put a wrong throughput number in the
 README. Pilot, then commit.
 
-### 5.9 An honest drought layer in the demo — OPEN
+### 5.9 An honest drought layer in the demo — RESOLVED
 
-**Status:** open; blocks the frontend milestone
+**Status:** resolved 2026-09-15 by changing the AOI, not by changing the layer.
+
+The problem was never the drought code; it was Indiana. Measured against the
+current USDM week, with the state outlines in EPSG:5070:
+
+| Class | California | Indiana |
+|---|---|---|
+| D0 abnormally dry | 47.00M acres (46.4% of state) | 0.89M (3.8%) |
+| D1 moderate | 17.67M acres (17.5%) | none |
+| D2 severe | 1.31M acres (1.3%) | none |
+| D3 / D4 | none | none |
+
+Two-thirds of California sits in some drought class in the *current* week, at
+three distinct severities. That makes the layer real without the historical
+backfill option 2 below proposed, and without dating the demo to a past week —
+the weekly refresh (§5.4) becomes a visibly moving layer rather than a cron job
+that changes nothing. The original analysis and its options are kept below
+because the reasoning still stands; it is the AOI that moved.
+
+---
+
+**Status (original):** open; blocks the frontend milestone
 
 **Context.** The pipeline correctly reports that Indiana has essentially no
 drought. Tippecanoe has none at all, and statewide the worst class present is
