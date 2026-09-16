@@ -1,10 +1,16 @@
-"""Read-through cache for POST /area (docs/DESIGN.md §5.7, §10 step 4).
+"""Read-through cache for the two polygon endpoints (docs/DESIGN.md §5.7, §10 step 4).
 
-Only /area is cached. GET /mapunit is an indexed lookup on 155,025 rows and
-Postgres already answers it in well under a millisecond; putting Redis in front
-of that would be decoration. /area is different: it does a spatial lookup and
-an aggregation across every map unit the drawn polygon touches, and the query
-space is unbounded because a caller can draw anything.
+POST /area and POST /area/mapunits are cached; GET /mapunit is not. That last
+one is an indexed lookup on a single key and Postgres already answers it in
+well under a millisecond, so putting Redis in front of it would be decoration.
+The polygon endpoints are different: both do a spatial lookup across every map
+unit the drawn polygon touches, and the query space is unbounded because a
+caller can draw anything.
+
+**The two endpoints cache separately, under different prefixes.** They share a
+polygon and the expensive `hits` CTE, but they return different things -- one
+an aggregation, one geometry -- and folding geometry into the /area payload
+would inflate exactly the response whose size §11's benchmark measures.
 
 Two decisions worth stating.
 
@@ -30,7 +36,12 @@ log = logging.getLogger("fieldscope.cache")
 
 # Bump when the response shape or the aggregation changes, so that old entries
 # are ignored rather than served. Cheaper and safer than remembering to flush.
-SCHEMA_VERSION = "v1"
+#
+# v2 (2026-09-16): AreaResponse gained a `drought` breakdown. Without a bump,
+# a v1 entry would rehydrate cleanly -- `drought` has a default -- and report
+# "no drought data" for a field that has some. A silently wrong answer is worse
+# than a miss.
+SCHEMA_VERSION = "v2"
 
 
 def normalise(geometry: dict, precision: int) -> dict:
@@ -56,11 +67,15 @@ def normalise(geometry: dict, precision: int) -> dict:
     return {"type": geometry["type"], "coordinates": walk(geometry["coordinates"])}
 
 
-def key_for(geometry: dict) -> str:
-    """A stable key for an already-normalised geometry."""
+def key_for(geometry: dict, prefix: str = "area") -> str:
+    """A stable key for an already-normalised geometry.
+
+    `prefix` separates the namespaces of endpoints that share a polygon but
+    answer different questions about it.
+    """
     blob = json.dumps(geometry, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(blob.encode()).hexdigest()[:32]
-    return f"area:{SCHEMA_VERSION}:{digest}"
+    return f"{prefix}:{SCHEMA_VERSION}:{digest}"
 
 
 class Cache:

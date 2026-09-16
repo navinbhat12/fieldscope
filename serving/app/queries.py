@@ -8,8 +8,8 @@ Python objects.
 
 from sqlalchemy import text
 
-# One map unit's breakdown. A plain indexed lookup on 155,025 rows; this is the
-# endpoint that needs no cache (§5.7).
+# One map unit's breakdown. A plain indexed lookup on the 311,726 California
+# overlay rows; this is the endpoint that needs no cache (§5.7).
 MAPUNIT = text(
     """
     SELECT mukey, musym, areasymbol, crop_code, drought_class,
@@ -75,29 +75,112 @@ AREA_BREAKDOWN = text(
         JOIN mukey_area ma ON ma.mukey = h.mukey
     ),
     -- Only map units that actually have overlay rows count as "answered".
-    -- The soil table holds 10,013 map units but the Indiana overlay covers
-    -- 7,534: border WFS tiles brought down soil from Illinois, Ohio, Kentucky
-    -- and Michigan (§5.10), which no Indiana land cover record can describe.
-    -- Counting those in the total would report coverage 1.0 for a field drawn
-    -- on the state line while quietly omitting half of it from the breakdown.
+    -- The soil table holds more map units than the overlay covers: the
+    -- bounding-box download legitimately brought down Arizona, Nevada and
+    -- Oregon survey areas (§5.10), which no California land cover record can
+    -- describe. Counting those in the total would report coverage 1.0 for a
+    -- field drawn on the state line while quietly omitting half of it from
+    -- the breakdown.
     totals AS (
         SELECT COALESCE(SUM(w.inter_m2), 0) AS answered_m2,
                COUNT(*)                     AS map_units
         FROM weighted w
         WHERE EXISTS (SELECT 1 FROM overlay o WHERE o.mukey = w.mukey)
     )
-    SELECT o.land_cover,
+    -- Two aggregations of the same rows, in one pass.
+    --
+    -- The frontend needs land cover *and* drought, but grouping by both at
+    -- once would return their cross product -- a Central Valley field already
+    -- yields ~67 land cover categories, and multiplying that by the drought
+    -- classes present inflates the response for no added information, since
+    -- nothing in the UI asks "how many acres of almonds are in D2".
+    --
+    -- Running two queries instead would be worse: each would re-execute the
+    -- `hits` CTE, and that spatial intersection against 484,325 polygons is
+    -- the expensive part of this endpoint. GROUPING SETS pays for it once.
+    -- `row_kind` says which shape each row is; the totals ride along via
+    -- MAX() so they survive both sets without joining the grouping keys.
+    SELECT CASE WHEN GROUPING(o.land_cover) = 0 THEN 'cover' ELSE 'drought' END
+               AS row_kind,
+           o.land_cover,
            o.crop_code,
            o.is_agricultural,
+           o.drought_class,
            SUM(o.acres  * w.fraction) AS acres,
            SUM(o.pixels * w.fraction) AS pixels,
-           t.answered_m2,
-           t.map_units
+           MAX(t.answered_m2)         AS answered_m2,
+           MAX(t.map_units)           AS map_units
     FROM weighted w
     JOIN overlay o ON o.mukey = w.mukey
     CROSS JOIN totals t
-    GROUP BY o.land_cover, o.crop_code, o.is_agricultural, t.answered_m2, t.map_units
+    GROUP BY GROUPING SETS (
+        (o.land_cover, o.crop_code, o.is_agricultural),
+        (o.drought_class)
+    )
     ORDER BY acres DESC
+    """
+)
+
+
+# The geometry behind POST /area/mapunits.
+#
+# Deliberately a separate query and a separate endpoint rather than another
+# column on AREA_BREAKDOWN. The two share the `hits` CTE, so this does repeat
+# the spatial work -- but folding geometry into the /area response would
+# inflate the payload that §11's cache benchmark measures, and every latency
+# figure already published for that endpoint would silently stop being
+# comparable. Geometry is also the part a client may not want: the numbers
+# render immediately, the map fills in behind them.
+#
+# What comes back is one feature per map unit, clipped to the drawn field, in
+# EPSG:4326 because that is what a web map consumes. The `dominant` CTE picks
+# each unit's largest land cover class by acreage, so the frontend can colour
+# a polygon without being handed every overlay row behind it.
+AREA_MAPUNITS = text(
+    """
+    WITH q AS (
+        SELECT ST_Transform(ST_SetSRID(ST_GeomFromGeoJSON(:geojson), 4326), 5070) AS geom
+    ),
+    hits AS (
+        -- ST_Collect, not ST_Union: polygons of the same map unit do not
+        -- overlap each other, so there is nothing to dissolve and the cheaper
+        -- of the two is correct. CollectionExtract(_, 3) drops the degenerate
+        -- points and lines that ST_Intersection emits where a field boundary
+        -- merely grazes a polygon edge, keeping the result a clean MultiPolygon.
+        SELECT sp.mukey,
+               ST_CollectionExtract(
+                   ST_Collect(ST_Intersection(sp.geom, q.geom)), 3
+               ) AS clipped,
+               SUM(ST_Area(ST_Intersection(sp.geom, q.geom))) AS inter_m2
+        FROM soil_polygon sp
+        JOIN q ON sp.geom && q.geom AND ST_Intersects(sp.geom, q.geom)
+        GROUP BY sp.mukey
+    ),
+    dominant AS (
+        SELECT DISTINCT ON (o.mukey)
+               o.mukey, o.musym, o.areasymbol,
+               o.land_cover, o.crop_code, o.is_agricultural, o.drought_class
+        FROM overlay o
+        JOIN hits h ON h.mukey = o.mukey
+        ORDER BY o.mukey, o.acres DESC
+    )
+    -- An inner join, so map units with no overlay rows fall out here exactly
+    -- as they fall out of `totals` above. A polygon the breakdown refuses to
+    -- count must not be drawn on the map as though it had been counted.
+    SELECT h.mukey,
+           d.musym,
+           d.areasymbol,
+           d.land_cover,
+           d.crop_code,
+           d.is_agricultural,
+           d.drought_class,
+           h.inter_m2,
+           ST_AsGeoJSON(ST_Transform(h.clipped, 4326), 6) AS geojson
+    FROM hits h
+    JOIN dominant d ON d.mukey = h.mukey
+    WHERE h.inter_m2 > 0
+    ORDER BY h.inter_m2 DESC
+    LIMIT :limit
     """
 )
 

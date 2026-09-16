@@ -38,6 +38,20 @@ class Settings:
     # database, the cache and this service together.
     db_pool_size: int = 5
 
+    # Browsers refuse a cross-origin fetch that the server does not opt into,
+    # and the frontend is served from a different host than this API. Defaults
+    # to "*" because every endpoint is read-only, unauthenticated and public --
+    # there is no session for another origin to ride. Narrow it by setting
+    # CORS_ORIGINS if that ever stops being true.
+    cors_origins: tuple[str, ...] = ("*",)
+
+    # An upper bound on how many map units POST /area/mapunits will return
+    # geometry for. The acreage cap above bounds the *area* of a request but
+    # not the number of shapes inside it, and geometry is far more expensive to
+    # serialise than a number. A field touches a handful of map units; 200 is
+    # well past that, and past it the map would be unreadable anyway.
+    max_geometry_features: int = 200
+
 
 def load_settings() -> Settings:
     return Settings(
@@ -46,8 +60,12 @@ def load_settings() -> Settings:
             "postgresql+psycopg://fieldscope:fieldscope@localhost:5432/fieldscope",
         ),
         redis_url=os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
-        max_query_acres=float(os.environ.get("MAX_QUERY_ACRES", 100_000)),
-        coord_precision=int(os.environ.get("COORD_PRECISION", 6)),
+        max_query_acres=float(os.environ.get("MAX_QUERY_ACRES", "100000")),
+        coord_precision=int(os.environ.get("COORD_PRECISION", "6")),
         cache_enabled=os.environ.get("CACHE_ENABLED", "1") not in ("0", "false", "False"),
-        db_pool_size=int(os.environ.get("DB_POOL_SIZE", 5)),
+        db_pool_size=int(os.environ.get("DB_POOL_SIZE", "5")),
+        cors_origins=tuple(
+            o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",") if o.strip()
+        ),
+        max_geometry_features=int(os.environ.get("MAX_GEOMETRY_FEATURES", "200")),
     )

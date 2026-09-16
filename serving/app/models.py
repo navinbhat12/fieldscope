@@ -56,6 +56,30 @@ class AreaRequest(BaseModel):
     geometry: Geometry
 
 
+# USDM severity, as the batch join stored it: the shapefile's DM attribute cast
+# to an integer, with -1 filled in for ground the drought layer does not cover
+# (scripts/run_join.py). -1 is therefore "not in drought", not "unknown".
+DROUGHT_LABELS: dict[int, str] = {
+    -1: "No drought",
+    0: "D0 — Abnormally dry",
+    1: "D1 — Moderate drought",
+    2: "D2 — Severe drought",
+    3: "D3 — Extreme drought",
+    4: "D4 — Exceptional drought",
+}
+
+
+def drought_label(code: int) -> str:
+    return DROUGHT_LABELS.get(code, f"Unknown ({code})")
+
+
+class DroughtSlice(BaseModel):
+    drought_class: int = Field(description="USDM severity; -1 means no drought.")
+    label: str
+    acres: float
+    share: float = Field(description="Fraction of answered acres, 0-1.")
+
+
 class LandCoverSlice(BaseModel):
     land_cover: str
     crop_code: int
@@ -89,10 +113,17 @@ class AreaResponse(BaseModel):
     )
     coverage: float = Field(
         description="answered_acres / query_acres. Below 1 where the polygon "
-        "extends past the soil survey -- open water, or outside Indiana."
+        "extends past the soil survey -- open water, or outside the AOI."
     )
     map_units: int
     breakdown: list[LandCoverSlice]
+
+    # Aggregated separately from `breakdown` rather than as a field on it: the
+    # two are independent views of the same acres, and crossing them would
+    # multiply an already long list (§ the GROUPING SETS note in queries.py).
+    # Both sum to answered_acres.
+    drought: list[DroughtSlice] = []
+
     cached: bool = False
 
     # Stated in the response rather than only in the docs, because the number
@@ -102,3 +133,48 @@ class AreaResponse(BaseModel):
         "Area-weighted from per-map-unit totals. Land cover is assumed "
         "uniformly distributed within each soil map unit."
     )
+
+
+# ---------------------------------------------------------------------------
+# POST /area/mapunits
+#
+# Plain GeoJSON rather than a bespoke shape, because the consumer is a web map
+# and every mapping library reads a FeatureCollection directly. Modelled
+# explicitly instead of returned as a bare dict so the OpenAPI schema describes
+# what is in `properties` -- a caller should not have to send a request to find
+# out what it can colour a polygon by.
+
+
+class MapUnitProperties(BaseModel):
+    mukey: str
+    musym: str | None
+    areasymbol: str | None
+
+    # The map unit's single largest land cover class by acreage, for colouring.
+    # A unit typically contains many; the full breakdown is what /area returns,
+    # and GET /mapunit/{mukey} has the per-unit detail.
+    land_cover: str
+    crop_code: int
+    is_agricultural: bool
+
+    drought_class: int
+    drought_label: str
+
+    acres: float = Field(description="Acres of this map unit inside the drawn field.")
+
+
+class MapUnitFeature(BaseModel):
+    type: Literal["Feature"] = "Feature"
+    geometry: dict
+    properties: MapUnitProperties
+
+
+class MapUnitGeometry(BaseModel):
+    type: Literal["FeatureCollection"] = "FeatureCollection"
+    features: list[MapUnitFeature]
+
+    # True when the map unit cap was hit and the smallest slivers were dropped.
+    # Stated rather than silently applied: a map missing pieces of its own
+    # answer should say so.
+    truncated: bool = False
+    cached: bool = False
