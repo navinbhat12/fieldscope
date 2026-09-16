@@ -32,6 +32,7 @@ Measure before committing to a full run:
 """
 
 import argparse
+import os
 import sys
 import threading
 import time
@@ -98,6 +99,16 @@ def aoi_footprint(aoi) -> shapely.geometry.base.BaseGeometry | None:
     if aoi.county_fips:
         counties = counties[counties.COUNTYFP == aoi.county_fips]
     return counties.geometry.union_all()
+
+
+# GDAL's HTTP driver has no timeout by default, so a WFS connection that goes
+# quiet blocks its worker forever -- and because the pool is joined on exit,
+# one dead socket hangs the whole state download after every tile has already
+# been fetched. Observed once on the California run at 760/761 tiles: the
+# process sat in sock_read at 0% CPU with the work finished. These two caps
+# turn that into a retryable exception, which the loop below already handles.
+os.environ.setdefault("GDAL_HTTP_TIMEOUT", "180")
+os.environ.setdefault("GDAL_HTTP_CONNECTTIMEOUT", "30")
 
 
 def fetch_tile(tile: tuple[float, float, float, float]) -> gpd.GeoDataFrame:
