@@ -37,3 +37,6 @@ CLAUDE.md
 
 # Run logs from long jobs; regenerate by rerunning the job.
 *.log
+
+# Local Claude Code permissions. Personal workflow config, stays local.
+.claude/settings.local.json
