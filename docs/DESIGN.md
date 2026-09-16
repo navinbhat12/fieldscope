@@ -621,6 +621,28 @@ alongside. Methodology stated with the figure, per §7. This is the one
 performance claim the serving tier is expected to make, and it is honest
 precisely because it is labelled a benchmark rather than production traffic.
 
+**Corrected 2026-09-15: this deployment is not free, and cannot be.** Two
+things were assumed and neither survived contact:
+
+1. **The Always Free tier does not include an external IPv4 address.** Google's
+   free-tier page lists exactly three Compute Engine items -- the `e2-micro`,
+   30 GB-months of standard persistent disk, and 1 GB of North America egress.
+   An address is not among them, and since Google's 2024 pricing change an
+   external IPv4 in use by a running VM is billed, at roughly $3.65/month.
+2. **The address cannot simply be removed.** The plan was to drop it once
+   Cloudflare Tunnel was up, on the reasoning that the tunnel dials outbound so
+   nothing needs an inbound address. The tunnel does dial outbound -- but a GCP
+   VM with no external address has no internet **egress** either, unless a Cloud
+   NAT gateway provides it, and Cloud NAT costs about $32/month. Removing the
+   address to save $3.65 would either break the tunnel or cost ten times more.
+
+So the running cost is ~$3.65/month for the address, and everything else stays
+inside the free tier. It is covered by $20 of one-time Google Developer Program
+credit (a Google AI Pro benefit), which is roughly five months of runway; after
+that it bills to a card unless the credit is renewed or the VM is destroyed.
+**Do not describe this deployment as free.** The e2-micro is free; the
+deployment is not.
+
 **Why this hosting.** GCP's Always Free tier covers one `e2-micro` with 30 GB
 of disk and 1 GB of monthly egress, indefinitely — not trial credits, so it
 does not consume a credit allowance that may be wanted elsewhere. Cloudflare
