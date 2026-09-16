@@ -10,6 +10,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from .insight import Insight
+
 
 class Geometry(BaseModel):
     """A GeoJSON geometry in EPSG:4326, as a web map produces it."""
@@ -50,6 +52,33 @@ class Geometry(BaseModel):
                 for ring in poly:
                     check(ring)
         return v
+
+
+class SoilSummary(BaseModel):
+    """What the ground under a field is, area-weighted across its map units.
+
+    Separate from `insight` on purpose: these are the measurements, that is
+    the reading of them. A caller that disagrees with the thresholds in
+    insight.py can ignore the prose and keep the numbers.
+    """
+
+    dominant_name: str | None = Field(
+        default=None, description="Soil name of the largest map unit in the field."
+    )
+    dominant_drainage: str | None = None
+    slope_pct: float | None = Field(default=None, description="Area-weighted slope, percent.")
+    water_storage: float | None = Field(
+        default=None, description="Area-weighted available water storage to 150 cm, in cm."
+    )
+    cultivable_share: float | None = Field(
+        default=None, description="Share of rated area in USDA capability class 1-4."
+    )
+    irrigable_share: float | None = Field(
+        default=None, description="Share of rated area carrying an irrigated capability class."
+    )
+    rated_share: float = Field(
+        description="Share of answered area that carries any capability rating."
+    )
 
 
 class AreaRequest(BaseModel):
@@ -118,6 +147,11 @@ class AreaResponse(BaseModel):
     map_units: int
     breakdown: list[LandCoverSlice]
 
+    # The ground itself, and a reading of it. Both optional so a deployment
+    # without the attribute table still answers, just without the soil half.
+    soil: SoilSummary | None = None
+    insight: Insight | None = None
+
     # Aggregated separately from `breakdown` rather than as a field on it: the
     # two are independent views of the same acres, and crossing them would
     # multiply an already long list (§ the GROUPING SETS note in queries.py).
@@ -149,6 +183,11 @@ class MapUnitProperties(BaseModel):
     mukey: str
     musym: str | None
     areasymbol: str | None
+
+    # From the SSURGO tabular half. Null for map units that have no attribute
+    # row -- open water, rock outcrop, dams -- which still have geometry.
+    soil_name: str | None = None
+    capability_class: int | None = None
 
     # The map unit's single largest land cover class by acreage, for colouring.
     # A unit typically contains many; the full breakdown is what /area returns,

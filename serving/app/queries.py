@@ -86,6 +86,49 @@ AREA_BREAKDOWN = text(
                COUNT(*)                     AS map_units
         FROM weighted w
         WHERE EXISTS (SELECT 1 FROM overlay o WHERE o.mukey = w.mukey)
+    ),
+    -- The soil half of the answer, as one row.
+    --
+    -- Weighted by intersected area per map unit -- not by overlay acres --
+    -- because capability is a property of the map unit, and `weighted` has
+    -- exactly one row per unit while the overlay has one per crop-drought
+    -- combination within it. Weighting by the latter would count a unit once
+    -- per crop growing on it.
+    --
+    -- Filtered to units that have overlay rows, for the same reason `totals`
+    -- is: the bounding-box download brought in Arizona, Nevada and Oregon
+    -- survey areas (§5.10) that no California land cover record describes,
+    -- and rating a field against ground the breakdown refuses to count would
+    -- make the two halves disagree.
+    soil AS (
+        SELECT
+            COALESCE(SUM(w.inter_m2) FILTER (WHERE a.mukey IS NOT NULL), 0) AS rated_m2,
+            -- USDA capability class 1-4 is "capable of cultivation". The
+            -- irrigated rating is preferred where it exists because the AOI
+            -- is California, where most farmed ground is irrigated; the
+            -- rainfed rating is the fallback, not the default.
+            COALESCE(SUM(w.inter_m2) FILTER (
+                WHERE COALESCE(a.cap_irrigated, a.cap_rainfed) BETWEEN 1 AND 4), 0)
+                AS cultivable_m2,
+            -- A null irrigated class means the ground cannot be irrigated at
+            -- all, which is an answer rather than a gap.
+            COALESCE(SUM(w.inter_m2) FILTER (WHERE a.cap_irrigated IS NOT NULL), 0)
+                AS irrigable_m2,
+            SUM(w.inter_m2 * a.slope_pct)
+                / NULLIF(SUM(w.inter_m2) FILTER (WHERE a.slope_pct IS NOT NULL), 0)
+                AS slope_pct,
+            SUM(w.inter_m2 * a.water_storage)
+                / NULLIF(SUM(w.inter_m2) FILTER (WHERE a.water_storage IS NOT NULL), 0)
+                AS water_storage,
+            (SELECT a2.muname
+               FROM weighted w2 JOIN mapunit_attr a2 ON a2.mukey = w2.mukey
+              ORDER BY w2.inter_m2 DESC LIMIT 1) AS dominant_soil,
+            (SELECT a2.drainage
+               FROM weighted w2 JOIN mapunit_attr a2 ON a2.mukey = w2.mukey
+              ORDER BY w2.inter_m2 DESC LIMIT 1) AS dominant_drainage
+        FROM weighted w
+        LEFT JOIN mapunit_attr a ON a.mukey = w.mukey
+        WHERE EXISTS (SELECT 1 FROM overlay o WHERE o.mukey = w.mukey)
     )
     -- Two aggregations of the same rows, in one pass.
     --
@@ -109,10 +152,21 @@ AREA_BREAKDOWN = text(
            SUM(o.acres  * w.fraction) AS acres,
            SUM(o.pixels * w.fraction) AS pixels,
            MAX(t.answered_m2)         AS answered_m2,
-           MAX(t.map_units)           AS map_units
+           MAX(t.map_units)           AS map_units,
+           -- `soil` is a single row, so every aggregate over it returns that
+           -- row's value; MAX() is only the mechanism for carrying it past
+           -- the grouping sets, as it is for the totals above.
+           MAX(s.rated_m2)            AS rated_m2,
+           MAX(s.cultivable_m2)       AS cultivable_m2,
+           MAX(s.irrigable_m2)        AS irrigable_m2,
+           MAX(s.slope_pct)           AS slope_pct,
+           MAX(s.water_storage)       AS water_storage,
+           MAX(s.dominant_soil)       AS dominant_soil,
+           MAX(s.dominant_drainage)   AS dominant_drainage
     FROM weighted w
     JOIN overlay o ON o.mukey = w.mukey
     CROSS JOIN totals t
+    CROSS JOIN soil s
     GROUP BY GROUPING SETS (
         (o.land_cover, o.crop_code, o.is_agricultural),
         (o.drought_class)
@@ -170,6 +224,8 @@ AREA_MAPUNITS = text(
     SELECT h.mukey,
            d.musym,
            d.areasymbol,
+           a.muname       AS soil_name,
+           COALESCE(a.cap_irrigated, a.cap_rainfed) AS capability_class,
            d.land_cover,
            d.crop_code,
            d.is_agricultural,
@@ -178,6 +234,9 @@ AREA_MAPUNITS = text(
            ST_AsGeoJSON(ST_Transform(h.clipped, 4326), 6) AS geojson
     FROM hits h
     JOIN dominant d ON d.mukey = h.mukey
+    -- LEFT, not inner: a map unit with no attribute row (open water, rock
+    -- outcrop, dams) still has geometry and still belongs on the map.
+    LEFT JOIN mapunit_attr a ON a.mukey = h.mukey
     WHERE h.inter_m2 > 0
     ORDER BY h.inter_m2 DESC
     LIMIT :limit

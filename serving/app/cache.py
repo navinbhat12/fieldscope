@@ -41,7 +41,10 @@ log = logging.getLogger("fieldscope.cache")
 # a v1 entry would rehydrate cleanly -- `drought` has a default -- and report
 # "no drought data" for a field that has some. A silently wrong answer is worse
 # than a miss.
-SCHEMA_VERSION = "v2"
+# v3 (2026-09-16): AreaResponse gained `soil` and `insight`. Same reasoning as
+# v2 -- both default to None, so a v2 entry would rehydrate as a field with no
+# soil rating rather than as a miss.
+SCHEMA_VERSION = "v3"
 
 
 def normalise(geometry: dict, precision: int) -> dict:

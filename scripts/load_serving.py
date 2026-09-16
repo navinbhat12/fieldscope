@@ -205,6 +205,44 @@ def load_soil(conn: psycopg.Connection, parquet: Path, chunk: int,
     return loaded
 
 
+def load_mapunit_attr(conn: psycopg.Connection, parquet: Path) -> int:
+    """Load the SSURGO tabular attributes.
+
+    ~20k rows, so no staging table and no chunking -- one COPY. Read through
+    pyarrow rather than pandas deliberately: this script runs inside the API
+    container, where pyarrow is a dependency and pandas is not installed.
+
+    Truncate-and-replace like every other table here, so a re-run converges
+    rather than accumulating.
+    """
+    log(f"loading map unit attributes from {parquet.name}")
+    table = ds.dataset(parquet).to_table()
+    rows = table.to_pylist()
+
+    conn.execute("TRUNCATE mapunit_attr")
+    cols = "mukey, muname, cap_rainfed, cap_irrigated, drainage, water_storage, slope_pct"
+    with conn.cursor() as cur, cur.copy(f"COPY mapunit_attr ({cols}) FROM STDIN") as cp:
+        for r in rows:
+            # pyarrow surfaces missing values as None, which is what the
+            # nullable columns want -- a map unit with no capability class
+            # (open water, rock outcrop, dams) is a real answer, not a gap.
+            cp.write_row(
+                (
+                    str(r["mukey"]),
+                    r["muname"],
+                    r["niccdcd"],
+                    r["iccdcd"],
+                    r["drclassdcd"],
+                    r["aws0150wta"],
+                    r["slopegraddcp"],
+                )
+            )
+    conn.commit()
+    n = conn.execute("SELECT count(*) FROM mapunit_attr").fetchone()[0]
+    log(f"map unit attributes: {n:,} rows")
+    return n
+
+
 def build_mukey_area(conn: psycopg.Connection) -> int:
     """Per-map-unit total area -- the denominator POST /area weights by."""
     log("mukey_area: aggregating")
@@ -229,7 +267,7 @@ def main() -> None:
     ap.add_argument("--aoi", default="indiana")
     ap.add_argument(
         "--only",
-        choices=["all", "overlay", "soil"],
+        choices=["all", "overlay", "soil", "attrs"],
         default="all",
         help="Skip the 2 GB soil load while iterating on the API.",
     )
@@ -251,6 +289,7 @@ def main() -> None:
 
     overlay_path = DATA / "processed" / f"overlay_{args.aoi}.parquet"
     soil_path = DATA / "raw" / f"ssurgo_{args.aoi}.parquet"
+    attr_path = DATA / "interim" / f"soil_attributes_{args.aoi}.parquet"
 
     for path in (overlay_path, soil_path):
         if args.only in ("all", "soil") or path == overlay_path:
@@ -269,6 +308,12 @@ def main() -> None:
         if args.only in ("all", "soil"):
             load_soil(conn, soil_path, args.chunk, args.simplify)
             build_mukey_area(conn)
+        if args.only in ("all", "attrs"):
+            if attr_path.exists():
+                load_mapunit_attr(conn, attr_path)
+            else:
+                log(f"no attribute file at {attr_path}; skipping "
+                    "(run scripts/download_soil_attributes.py)")
 
         log("building indexes (GiST over the soil geometry is the slow one)")
         idx_started = time.time()
@@ -277,7 +322,7 @@ def main() -> None:
 
         counts = {
             t: conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
-            for t in ("overlay", "soil_polygon", "mukey_area")
+            for t in ("overlay", "soil_polygon", "mukey_area", "mapunit_attr")
         }
 
     # Invalidate by flushing rather than by expiry (§10 step 4): cached answers

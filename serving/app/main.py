@@ -14,6 +14,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
+from . import insight as insight_rules
 from .cache import Cache, key_for, normalise
 from .config import load_settings
 from .db import make_engine
@@ -27,6 +28,7 @@ from .models import (
     MapUnitProperties,
     MapUnitResponse,
     MapUnitRow,
+    SoilSummary,
     drought_label,
 )
 from .queries import AREA_BREAKDOWN, AREA_MAPUNITS, M2_PER_ACRE, MAPUNIT, QUERY_AREA
@@ -209,11 +211,50 @@ def area(req: AreaRequest) -> AreaResponse:
     answered_acres = rows[0]["answered_m2"] / M2_PER_ACRE
     total = sum(r["acres"] for r in cover_rows) or 1.0
 
+    # The soil half. Carried on every row by MAX() alongside the totals, so it
+    # survives both grouping sets.
+    r0 = rows[0]
+    answered_m2 = r0["answered_m2"] or 0.0
+    rated_m2 = r0["rated_m2"] or 0.0
+    coverage = round(answered_acres / query_acres, 4) if query_acres else 0.0
+
+    soil = SoilSummary(
+        dominant_name=r0["dominant_soil"],
+        dominant_drainage=r0["dominant_drainage"],
+        slope_pct=r0["slope_pct"],
+        water_storage=r0["water_storage"],
+        cultivable_share=(r0["cultivable_m2"] / rated_m2) if rated_m2 else None,
+        irrigable_share=(r0["irrigable_m2"] / rated_m2) if rated_m2 else None,
+        rated_share=(rated_m2 / answered_m2) if answered_m2 else 0.0,
+    )
+
+    agricultural_share = (
+        sum(r["acres"] for r in cover_rows if r["is_agricultural"]) / total
+    )
+
+    # Computed here rather than in the client so it is cached with the rest of
+    # the answer, and so any caller of this API gets the same reading.
+    reading = insight_rules.build(
+        coverage=coverage,
+        rated_m2=rated_m2,
+        cultivable_m2=r0["cultivable_m2"] or 0.0,
+        irrigable_m2=r0["irrigable_m2"] or 0.0,
+        answered_m2=answered_m2,
+        agricultural_share=agricultural_share,
+        slope_pct=r0["slope_pct"],
+        water_storage=r0["water_storage"],
+        dominant_soil=r0["dominant_soil"],
+        dominant_drainage=r0["dominant_drainage"],
+        drought=[(r["drought_class"], r["acres"] / total) for r in drought_rows],
+    )
+
     response = AreaResponse(
         query_acres=round(query_acres, 3),
         answered_acres=round(answered_acres, 3),
-        coverage=round(answered_acres / query_acres, 4) if query_acres else 0.0,
+        coverage=coverage,
         map_units=rows[0]["map_units"],
+        soil=soil,
+        insight=reading,
         breakdown=[
             LandCoverSlice(
                 land_cover=r["land_cover"],
@@ -282,6 +323,8 @@ def area_mapunits(req: AreaRequest) -> MapUnitGeometry:
                     mukey=r["mukey"],
                     musym=r["musym"],
                     areasymbol=r["areasymbol"],
+                    soil_name=r["soil_name"],
+                    capability_class=r["capability_class"],
                     land_cover=r["land_cover"],
                     crop_code=r["crop_code"],
                     is_agricultural=r["is_agricultural"],

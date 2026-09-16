@@ -46,3 +46,30 @@ CREATE TABLE IF NOT EXISTS mukey_area (
     total_m2 double precision NOT NULL,
     polygons integer          NOT NULL
 );
+
+-- Map unit attributes, from SSURGO's tabular half (scripts/download_soil_attributes.py).
+--
+-- The geometry download carries only mukey, musym and areasymbol -- an
+-- identifier and a shape. Without this table the serving tier can say how a
+-- field divides across map units but nothing about the ground itself, which
+-- makes every number it returns uninterpretable: "59% shrubland" means one
+-- thing on class 3 cropland and something else entirely on class 7 rangeland.
+--
+-- A dimension table keyed on the same mukey the join already carries, so it
+-- costs one small load and nothing in the batch pipeline.
+CREATE TABLE IF NOT EXISTS mapunit_attr (
+    mukey         text PRIMARY KEY,
+    muname        text,
+    -- USDA land capability class, 1-8: 1-4 cultivable, 5-8 not. Rainfed and
+    -- irrigated are separate ratings and both are kept -- in California the
+    -- irrigated one is usually the meaningful figure, but it is null where
+    -- the ground cannot be irrigated at all, and that absence is an answer
+    -- rather than a gap.
+    cap_rainfed   smallint,
+    cap_irrigated smallint,
+    drainage      text,
+    -- Available water storage to 150 cm, in cm.
+    water_storage double precision,
+    -- Representative slope gradient, percent. Fractional, not integral.
+    slope_pct     double precision
+);
