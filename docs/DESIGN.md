@@ -689,13 +689,37 @@ fix. Storing an exact raw area as the denominator while intersecting simplified
 geometry for the numerator would stop the cancellation and bias every fraction
 low by roughly a percent. Self-consistent geometry beats a half-exact ratio.
 
-**What is actually unmeasured is the thing that matters:** the change in the
-`fraction` each request returns, rather than the change in area. The check is
-cheap and specific — run the benchmark's 300 polygons through `/area` against
-raw and simplified geometry and compare the returned acreage per map unit. Do
-that before the simplified table is quoted anywhere. Until then `--simplify 0`
-loads the geometry as surveyed, and the default of 30 is a deploy convenience
-justified by RAM, not yet by accuracy.
+**Measured 2026-09-15 — and the cancellation is real.** The 300 California
+benchmark polygons were run through `/area` against the raw table, the table was
+reloaded at a 30 m tolerance, and the same polygons re-run:
+
+| | median | p95 | worst |
+|---|---|---|---|
+| Answered acres, per polygon | **-0.126%** | +1.276% | 9.583% |
+| Acres per land-cover row (rows over 0.5 ac) | +0.035% | +2.525% | 33.546% |
+| Coverage ratio | -0.0012 | | 0.0958 |
+| Map units touched | 0 | | +/-1 |
+
+Total across all 300: **200,469 -> 199,947 acres, -0.261%**. Four polygons of
+300 gained or lost a land-cover category outright, all of them slivers.
+
+So the geometry moves -1.07% in area but the answers move -0.261%, which is the
+cancellation this section predicted, now measured rather than argued. The
+worst cases are real and should not be hidden: one polygon moved 9.6%, and one
+land-cover row moved 33.5%. Both are small-denominator rows where a sliver
+that survived simplification in one table did not in the other.
+
+**Decision: ship simplified.** 244 MB against 1,302 MB, for a typical answer
+change of about a tenth of a percent, on a VM with 615 MB of available RAM. The
+size measurement matches Indiana's prediction almost exactly: 18.7% of raw
+against the 18.8% measured there.
+
+**What may still be quoted, and what may not.** Acreage from the simplified
+table is accurate to roughly a percent for a field-sized query, which is well
+inside the resolution of a 30 m crop raster and fine for a demo. It is not
+accurate enough to present as a survey figure, and any per-row acreage on a
+sliver should be treated as indicative. `--simplify 0` still loads the geometry
+as surveyed for anything that needs the exact table.
 
 **Deliberately excluded.** Recorded because the reasons are the point:
 
