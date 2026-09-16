@@ -1393,6 +1393,157 @@ now AOI-correct so the measurement will mean something.
 
 ---
 
+## 14. The frontend, and the soil layer it needed
+
+Added 2026-09-16.
+
+### 14.1 What the API gained first
+
+Three gaps blocked any frontend, and none were visible from the outside.
+
+**CORS did not exist.** No middleware at all, so a browser on any other origin
+could not call the API. Wide open by default now: every endpoint is read-only,
+unauthenticated and public, so there is no session for another origin to ride.
+
+**Drought never reached a caller.** `AREA_BREAKDOWN` grouped by land cover and
+silently dropped `drought_class`, so two of the three joined layers were
+invisible. Both aggregations now come back from one pass via `GROUPING SETS`
+rather than as their cross product -- a Central Valley field already yields ~74
+land cover categories, and multiplying that by drought classes adds rows
+without adding information. One pass because the spatial intersection against
+484,325 polygons is the expensive part; two queries would pay for it twice.
+
+**Nothing returned geometry.** `POST /area/mapunits` now returns the soil map
+units under a drawn field, clipped to it, as GeoJSON in EPSG:4326. Kept off
+`/area` deliberately: folding geometry into that response would inflate the
+payload §11's cache benchmark measures, and every latency figure already
+published for it would quietly stop being comparable.
+
+Verified rather than assumed: the two polygon endpoints agree on which map
+units count (9 features against 9 `map_units`, 629.078 acres against
+`answered_acres` 629.077), both grouping sets sum to the same acreage, and the
+error paths agree -- which is why the pre-flight is now shared rather than
+copied.
+
+### 14.2 The soil layer was an identifier, not soil
+
+The bigger finding. `download_ssurgo.py` pulls `mapunitpoly` only, so the
+overlay carried `mukey`, `musym` and `areasymbol` -- an identifier and a shape.
+The serving tier could say how a field divided across map units and nothing
+about the ground. That made every number it returned uninterpretable: "59%
+shrubland" means one thing on class 3 cropland and something else on class 7
+rangeland.
+
+`scripts/download_soil_attributes.py` fetches SSURGO's tabular half from Soil
+Data Access -- free, no key, keyed on the same `mukey`. For California that is
+19,607 rows: soil name, rainfed *and* irrigated land capability class,
+drainage, available water storage and slope. **A dimension table, so nothing in
+the batch pipeline was re-run.**
+
+Irrigated capability is carried alongside rainfed and preferred where it
+exists, because the AOI is California: only 8,132 of 19,607 map units can be
+irrigated at all, and rating Central Valley ground on its rainfed capability
+alone understates what it actually supports. A null irrigated class is an
+answer, not a gap.
+
+Coverage: capability 19,264, slope 19,364, water storage 18,995. The 343 map
+units with no capability class are Dams, Water, Rock outcrop and Rubble land --
+missing means "not farmable ground", not a data gap.
+
+### 14.3 The reading: rules, not a model
+
+`serving/app/insight.py` turns the measurements into a reading of the land. The
+spine is **capability against use** -- USDA's capability class already encodes
+what ground can support, so the interesting question is not what is growing but
+whether it matches what the soil could carry. That one comparison serves a
+grower, a buyer, a lender and a conservation planner at once.
+
+Rules rather than a language model, for three reasons: every sentence is
+traceable to a number and a threshold written down in one file, it costs
+nothing to serve, and it cannot invent a fact about ground it has never seen.
+A model asked "what does 59% shrubland mean" would answer from general
+knowledge rather than from this field. Thresholds are named constants gathered
+at the top of the module so they can be argued with rather than reverse
+engineered out of the prose.
+
+It computes server-side, so it rides the existing Redis cache with the rest of
+the answer. Cache `SCHEMA_VERSION` moved to **v3** -- both `soil` and `insight`
+default to null, so a v2 entry would rehydrate as a field with no soil rating
+rather than as a miss.
+
+Validated over 90 real California polygons rather than the three examples:
+
+| Reading | Fields |
+|---|---|
+| Marginal ground, and used as such | 43 |
+| Cultivable ground, largely out of production | 23 |
+| Mixed ground, partly in production | 15 |
+| Capable ground, and it is being farmed | 9 |
+
+The spread tracks the underlying data -- only ~34% of California map units are
+class 1-4.
+
+**What it refuses to do:** recommend a crop, price a parcel, or rate fire risk.
+Those need yield history, comparable sales and fuel models this pipeline does
+not have, and asserting them from soil class and land cover would be dressing a
+guess as an answer.
+
+### 14.4 The frontend
+
+Vite + React + TypeScript + MapLibre GL, Tailwind v4, no charting library --
+the visualisations are stacked proportion bars and a ranked list, which are div
+widths and SVG rects. Terra Draw (`@watergis/maplibre-gl-terradraw`) for
+drawing; `mapbox-gl-draw` is unmaintained and awkward against MapLibre.
+
+**Colour encodes the land cover *group*, not the individual crop and not its
+rank.** Rank would repaint the legend on every new field, so "almonds is blue"
+would stop being true. There are eight groups against 134 CDL codes (all 134
+mapped exactly once, verified), which fits inside the seven-slot ceiling where
+adjacent hues stay distinguishable. Groups are stacked in fixed order so the
+pairs that touch are the pairs that were validated as touching, and so two
+fields' bars can be compared by eye.
+
+Palettes were validated against this panel's actual surface (`#191817`), not
+eyeballed: the seven categorical slots pass the lightness band, chroma floor,
+CVD separation (worst adjacent dE 8.4), normal-vision floor (19.3) and 3:1
+contrast. Drought is treated as **ordinal**, not categorical -- severity order
+carries meaning -- so it takes a single amber hue with monotone lightness,
+darkest step 2.62:1 on the surface. Amber rather than blue because blue reads
+as water on a map about drought.
+
+### 14.5 Three bugs worth recording
+
+**The map container lost a CSS cascade fight.** MapLibre adds
+`.maplibregl-map` to the container element, and `maplibre-gl.css` is
+**unlayered** while Tailwind v4 emits utilities inside `@layer utilities`.
+Unlayered styles beat layered ones regardless of specificity or order, so
+`.maplibregl-map { position: relative }` silently overrode `absolute`. The
+element laid out as an ordinary block -- full width, zero height -- and
+MapLibre's `clientHeight || 300` produced a 300px canvas inside a full-height
+container, which looks exactly like a map that failed to load. The container's
+geometry is now an inline style, which outranks both. **Any Tailwind class on a
+MapLibre- or Terra Draw-owned element can lose the same way.**
+
+**Vite's dependency pre-bundler broke MapLibre's web worker.** It rewrites the
+entry but does not emit `maplibre-gl-worker.mjs` alongside it, so the worker
+404s and the `Map` constructor throws. With no error boundary React unmounted
+the whole tree -- a blank page rather than a broken map.
+`optimizeDeps.exclude: ['maplibre-gl']` fixes it; an `ErrorBoundary` now makes
+the next such failure legible.
+
+**The basemap was the wrong choice, measured.** OpenFreeMap's dark style
+references an icon named `circle-11` while its sprite sheet contains only
+`circle_11`, so MapLibre raised an error on every render, and its tile endpoint
+returned intermittent 403s. CARTO Dark Matter's sprite is internally
+consistent, its tiles answered 8/8 in ~0.13s, and it carries 93 styled layers
+against 47.
+
+A note on verification method: Vite's dev server returns `200 text/html` for
+*any* unknown path, so "the file returns 200" proves nothing. Check the
+content-type, or check disk.
+
+---
+
 ## 12. Next steps
 
 Rewritten 2026-09-15 at end of session. Milestone numbers refer to §8.
@@ -1403,6 +1554,14 @@ deployed. The batch pipeline runs at state scale against California
 three open design questions that were blocking — the drought layer (§5.9),
 the simplification cost (§5.11), and the AOI choice — are all closed with
 measurements. **The only thing missing from the product is the frontend.**
+
+**0. STATUS 2026-09-16 — the frontend exists and runs locally.** §14 records
+what was built: the API gained CORS, drought and a geometry endpoint; SSURGO's
+tabular attributes were added as a dimension table; a rules-based reading of
+each field ships inside the cached `/area` response; and a React/MapLibre
+frontend renders it. **It has only ever run locally — the VM still serves the
+pre-§14 API, and nothing is deployed.** Items 1-7 below are written as they
+stood before that work; read them against §14.
 
 **1. The frontend (milestone 6). This is the whole remaining product.**
 React + TypeScript + MapLibre GL on Cloudflare Pages. Nothing blocks it:
