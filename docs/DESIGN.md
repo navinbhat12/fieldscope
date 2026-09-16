@@ -1513,6 +1513,58 @@ median is already fast, what makes p95 slow, and how a warm cache removes it.
 **6. The slow-block skew (§5.5).** Reproduced on California and materially
 narrowed — see that section for what was ruled out. Still open.
 
+**7. Vercel as an alternative or additional host — OPEN, asked 2026-09-15.**
+Checked against current documentation rather than assumed, because the platform
+has moved: Vercel runs FastAPI natively on Fluid Compute with Python 3.13/3.14,
+the default function timeout is 300s, and `@vercel/postgres` is sunset in favour
+of Marketplace providers.
+
+**It would work, and it is free:**
+
+| | |
+|---|---|
+| Neon Postgres | PostGIS installable on any project |
+| Neon free tier | **0.5 GB storage/project** — the California database is 295 MB |
+| | 100 CU-hours/month compute, 5 GB egress |
+| Vercel Hobby | free, and a **stable `*.vercel.app` hostname** |
+| Upstash Redis | free tier, via Marketplace |
+
+That is attractive because it closes both open gaps in §13 at once: the ~$3.65/mo
+external IPv4 goes to zero, and the quick tunnel's rotating hostname becomes a
+permanent URL without buying a domain.
+
+**Four caveats, in descending order of how much they matter:**
+
+1. **The cache benchmark would probably look worse, and that is the headline
+   number.** On the VM, Redis is on loopback — microseconds. On Vercel it is
+   Upstash over HTTP, a network round trip, while the Postgres hop is also
+   remote. §11's claim is that Redis cuts tail latency 7x; that margin depends
+   on the cache being much closer than the database, and Vercel narrows the gap
+   between them. This must be re-measured before the architecture is described
+   either way, and the result may be less flattering.
+2. **One state only.** Both states simplified is ~750 MB against a 500 MB free
+   cap. California alone fits with headroom; adding Indiana (§12.4) does not.
+3. **Compute is not obviously better.** Neon's free compute is ~0.25 CU, and
+   `POST /area` runs `ST_Intersects` against 484,325 polygons. That is the same
+   class of machine as the `e2-micro`, not an upgrade.
+4. **It partly reverses §5.11.** Containers were chosen over the edge
+   deliberately, because Navin leans generalist SWE and wanted a stack that
+   reads that way. Managed serverless plus a managed database is a different
+   story — not a worse one, but a different one, and the reason for the original
+   choice has not changed.
+
+**Recommended split, rather than either/or:**
+
+- **Frontend on Vercel: yes, unambiguously.** Free, stable URL, the natural home
+  for React, and it disturbs nothing that already works. This supersedes the
+  Cloudflare Pages line in §5.11 only if Pages turns out to be more awkward;
+  both are free and either is fine.
+- **API migration: a real option, not a default.** It is a genuine migration
+  with a genuine risk to the benchmark. The strongest outcome is arguably to
+  keep the container deploy *and* measure the serverless one — "I deployed it
+  both ways and here is what each cost" is a better answer than either
+  deployment alone, and the measurement is cheap once the frontend exists.
+
 **Explicitly not next.** Terraform and CI (§5.11) remain optional. Alembic
 stays unnecessary. The weekly drought refresh is descoped (§5.4). More states
 beyond a second are out of scope.
