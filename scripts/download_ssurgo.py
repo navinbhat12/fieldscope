@@ -86,7 +86,9 @@ def aoi_footprint(aoi) -> shapely.geometry.base.BaseGeometry | None:
     Returns None if the boundary file has not been downloaded, in which case
     every tile in the bounding box is fetched -- correct, just wasteful.
     """
-    path = RAW / "counties_in.gpkg"
+    legacy = RAW / "counties_in.gpkg"
+    path = legacy if (aoi.state_fips == "18" and legacy.exists()) \
+        else RAW / f"counties_{aoi.state_fips}.gpkg"
     if not path.exists():
         log(f"note: {path.name} missing, so no tiles can be skipped "
             f"(run download_boundaries.py first)")

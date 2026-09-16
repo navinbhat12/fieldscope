@@ -599,6 +599,36 @@ the API together. Mitigations in order of preference: tune `shared_buffers`
 down and cap Redis with `maxmemory`; `ST_Simplify` the polygons for the demo;
 move to `e2-small` (~$13/month) only if the first two fail.
 
+**Confirmed 2026-09-15: the budget is zero, so `e2-small` is off the table.**
+Paying monthly for a portfolio link was rejected outright, which makes the 1 GB
+ceiling a hard constraint rather than a risk to be escalated out of. The scope
+moves instead: **one state, chosen for agricultural range**, rather than several.
+
+**`ST_Simplify` is promoted from fallback to design, and it is measured.** Over
+a 40,000-polygon sample of the loaded Indiana table:
+
+| Tolerance | Geometry size | Share of raw |
+|---|---|---|
+| raw | 53 MB | 100% |
+| 10 m | 18 MB | 34% |
+| 30 m | 10 MB | **18.8%** |
+
+At 30 m the whole soil layer drops from 2.44 GB to roughly 460 MB, which is
+what makes 1 GB of RAM a workable target rather than a 2.4x overcommit.
+
+**30 m is not a tuning knob, it is the resolution of the question.** The crop
+layer is a 30 m grid, so a soil boundary resolved more finely than 30 m cannot
+change any answer the API returns — the finest thing being attributed is a
+single CDL pixel. Simplifying to the raster's own resolution discards
+precision the output was never able to express. This costs a little area
+accuracy at polygon edges and that cost should be measured against the raw
+geometry before it is quoted, but it is not the "cheap, costs some precision"
+compromise the line above called it.
+
+**The answers are not simplified — only the geometry used to find them.** The
+`overlay` table is 15 MB per state and holds every acre figure the API reports;
+`soil_polygon` exists only to resolve a drawn polygon to a set of map units.
+
 **Deliberately excluded.** Recorded because the reasons are the point:
 
 - **Kafka** — the only recurring input is a weekly drought refresh (§5.4).
@@ -921,11 +951,37 @@ are selected by `--aoi`.
 
 **The binding constraint is storage, and it is already measurable.** Indiana's
 soil geometry alone is ~2.3 GB loaded, against 30 GB of Always Free disk
-(§5.11). California's SSURGO is substantially larger than Indiana's. Three or
-four states is plausible; the whole country is not, on this hosting. Two levers
-exist if it gets tight: `ST_Simplify` on the served geometry (cheap, costs some
-area precision), or storing soil geometry only for the states actually
-demoable. Decide with measured table sizes, not estimates.
+(§5.11). Three or four states is plausible; the whole country is not, on this
+hosting. Two levers exist if it gets tight: `ST_Simplify` on the served
+geometry (cheap, costs some area precision), or storing soil geometry only for
+the states actually demoable. Decide with measured table sizes, not estimates.
+
+**Superseded 2026-09-15 — one state, swapped rather than added.** The budget for
+hosting is zero, which fixes the host at an `e2-micro` and its 1 GB of RAM
+(§5.11). Rather than accept a degraded demo across several states, the AOI
+becomes a *single* state chosen for agricultural range, and Indiana is replaced
+rather than joined.
+
+**The estimate above was wrong, and measurement is why we know.** This section
+asserted that "California's SSURGO is substantially larger than Indiana's."
+`download_ssurgo.py --aoi california --pilot 10` says otherwise:
+
+| | Indiana | California |
+|---|---|---|
+| Soil polygons | 1,482,366 | 442,369 (projected from 10 tiles) |
+| Tiles intersecting the state | 238 | 761 |
+| Measured fetch rate | ~20s/tile | 1.0s/tile at 4 workers |
+| Projected download | ~1 hr | 13 min |
+
+California covers 4.5x Indiana's land area with **3.3x fewer** soil polygons,
+because SSURGO's detail follows survey intensity rather than area: Indiana is
+uniformly row-cropped land mapped at fine grain, while California's deserts,
+rangeland and mountains are mapped as very large units. Bounding-box area was
+the wrong proxy and predicted the answer backwards.
+
+The consequence is that the expensive side of a California run is the raster,
+not the vector: ~470M CDL pixels against Indiana's 104M, joined to a
+*smaller* polygon set.
 
 **A drought state changes the refresh story too.** §5.4's weekly USDM refresh is
 currently a cron job that changes nothing, because Indiana is never in drought.
@@ -1030,46 +1086,81 @@ what makes those cases different.
 
 ## 12. Next steps
 
-Ordered by what unblocks what, current as of 2026-09-14. Milestone numbers refer
-to §8.
+Rewritten 2026-09-15, after the hosting budget was fixed at zero and the AOI
+was changed from "Indiana plus a few states" to "one state, chosen for range".
+Milestone numbers refer to §8.
 
-**1. Deploy (5c).** The only thing between this and a link someone can click.
-`gcloud compute instances create` for an e2-micro on the Always Free tier,
-`docker compose up`, `cloudflared` for ingress (§5.11). Needs account access, so
-it is not unattended work. Two things to expect: the soil geometry is ~2.3 GB
-loaded against 30 GB of disk, comfortable; and ~1 GB of RAM shared between
-Postgres, Redis and the API is the real risk, with mitigations in §5.11 in order
-of preference. **The laptop benchmark does not transfer** — a shared vCPU is a
-different machine, so §11 has to be re-run there before any figure is quoted
-next to the deployed link.
+**The order changed.** Deploy was previously first, on the reasoning that a
+link someone can click is the only thing missing. That still holds, but
+deploying Indiana would mean deploying a demo whose drought layer is empty
+(§5.9) and whose crop layer has two colours — and then redoing the load against
+a different state. The state swap now comes first because it is upstream of
+both the deploy and the frontend.
 
-**2. Settle §5.9, because it blocks the frontend.** Now measured rather than
-suspected: `drought_class` takes exactly two values across all 155,025 rows,
-`-1` and `0`. Indiana has no drought at all, so the layer is empty rather than
-sparse, and whatever the frontend renders for it would be honest and blank. The
-three options are to cut the layer, to show a national inset where drought does
-exist, or to backfill a historical week when Indiana was in drought and label it
-as such. This is a product decision, not an engineering one.
+**1. Swap the AOI to California.** Chosen for agricultural range: the widest
+crop mix in the country and its most severe drought record, so all three
+datasets show their full range against one AOI and §5.9 resolves itself without
+a historical backfill. The pilot's measured sizes are in § "Planned: more than
+one state" — the vector side is *smaller* than Indiana's; the raster side is
+~470M pixels against 104M and is the real cost.
 
-**3. More states (§ "Planned: more than one state").** The real fix for §5.9 and
-independently worth doing: Indiana alone exercises two of the three datasets.
-Nothing in `serving/` hardcodes Indiana and both loader inputs are selected by
-`--aoi`, so the work is acquisition plus storage headroom, not a rewrite. Decide
-from measured table sizes, not estimates.
+  - Acquisition: `download_boundaries.py`, `download_ssurgo.py`,
+    `download_cdl.py`, each `--aoi california`. All network-bound and resumable.
+  - The join is the expensive step and needs `--chunks` raised from Indiana's
+    12; block 92 (§5.5) showed what one oversized block costs, and California's
+    desert map units are large enough to make that failure mode more likely,
+    not less. Re-measure with a pilot before committing the full run.
+  - **Indiana is not deleted.** `overlay_indiana.parquet` stays on disk and the
+    loader still takes `--aoi`, so the swap is reversible if California's join
+    does not converge.
 
-**4. Frontend.** React + TypeScript + MapLibre on Cloudflare Pages (§5.11),
-after §5.9 decides what the drought layer shows. Ships with a static snapshot of
-the overlay so the demo degrades rather than breaking if the origin is down.
+**2. Simplify the served geometry (§5.11).** Measured at 18.8% of raw at a 30 m
+tolerance, which is what makes 1 GB of RAM workable. Do this as a load-time
+step so the raw geometry stays in Parquet and the decision stays reversible.
+Measure the area error it introduces against the raw geometry before quoting
+any acreage from the simplified table.
 
-**5. The heavy tail, unexplained.** Uncached p99 is 220 ms and the slowest single
-request observed was 616 ms, against a 7.8 ms median (§11). A small subset of
-polygons touches enough map units to cost two orders of magnitude more than a
-typical one, and nothing measures which or why. The first step is cheap:
-correlate `/area` latency against the number of map units a polygon intersects,
-which the endpoint already returns. This rhymes with block 92 of the Indiana
-join (§5.5) — in both cases a small part of the workload dominates the total and
-nothing yet counts what makes those cases different.
+**3. Deploy (5c).** `gcloud compute instances create` for an `e2-micro` on the
+Always Free tier, `docker compose up`, `cloudflared` for ingress (§5.11). Needs
+account access, so it is not unattended work. Ship the loaded database as a
+`pg_dump -Fc` rather than re-running the loader on the VM: the local dump of
+Indiana is 2.13 GB from a 3.7 GB database, and restoring a dump asks far less
+of a shared vCPU than reprojecting 1.5M polygons on it. **The laptop benchmark
+does not transfer** — §11 has to be re-run on the VM before any figure is
+quoted next to the deployed link.
+
+**4. Frontend.** React + TypeScript + MapLibre on Cloudflare Pages (§5.11).
+**It has to be interactive and modern** — this is the surface anyone evaluating
+the project actually sees, and a competent map that responds well is worth more
+than another backend feature. Ships with a static snapshot of the overlay so
+the demo degrades rather than breaking if the origin is down.
+
+**5. Explain the cache result, after the vertical slice is up.** §11 measures
+*that* Redis cuts the tail without moving the median; it does not explain
+*why*, and the explanation is what makes the number worth talking about. Three
+questions, in order:
+
+  - Why is the median already fast? The no-op control costs 5.03 ms p50 against
+    a 7.8 ms uncached median, so the query itself is only ~2.8 ms and there is
+    almost nothing for a cache to remove at p50.
+  - What specifically makes p95 slow? Uncached p99 is 220 ms and the slowest
+    single request was 616 ms. The hypothesis is that a few polygons touch many
+    more map units than typical. The cheap first step is to correlate `/area`
+    latency against the map-unit count the endpoint already returns.
+  - How does a warm cache remove it? Presumably by skipping the PostGIS
+    intersection entirely for exactly those expensive polygons — which should
+    be visible as the tail collapsing toward the control floor rather than the
+    whole distribution shifting.
+
+  This is deliberately *after* the deploy and the frontend. It sharpens a
+  number that is already defensible; it does not unblock anything.
+
+**6. The heavy tail's cousin: block 92 (§5.5).** The join and the serving path
+show the same shape — a small part of the workload dominating the total, with
+nothing counting what makes those cases different. Worth doing once, in a way
+that answers both.
 
 **Explicitly not next.** Terraform and CI (§5.11) remain optional and
 non-blocking. Alembic stays unnecessary until a loaded VM exists and a reload
 costs an hour rather than three minutes (§ "Amendments made during the build").
+Additional states beyond the chosen one are out of scope at zero budget.
