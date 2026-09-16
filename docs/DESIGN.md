@@ -843,6 +843,88 @@ an "under review" note and now needs rewriting.
 
 ---
 
+## 9b. The California run
+
+**Status:** run and validated, 2026-09-15. This is the AOI the demo ships with;
+§9 remains the Indiana record and Indiana's output is kept on disk.
+
+### The command
+
+```bash
+.venv/bin/python -u scripts/run_join.py --aoi california --strategy broadcast \
+  --chunks 32 --cores 6 --memory 8g
+```
+
+`--chunks 32` rather than Indiana's 12, chosen so the blocks match Indiana's in
+size rather than in count: Indiana's 12x12 over a 3.35x4.02 deg box gave
+23 x 39 km blocks, and 32x32 over California's 10.35x9.48 gives 22 x 38 km.
+Same per-block workload, more blocks. 1024 blocks, of which roughly half fall
+outside the state and cost nothing.
+
+### Measured result
+
+| | Indiana | California |
+|---|---|---|
+| Land cover records | 104,126,688 | **455,106,622** |
+| Soil polygons | 1,482,366 | **484,325** |
+| Matched | 104,125,537 (99.9989%) | **455,079,266 (99.9940%)** |
+| Output rows | 155,025 | **311,726** |
+| Distinct map units | 7,534 | **19,607** |
+| Join wall time | 4,103s | **3,752.8s** |
+| Total pipeline | 4,146s (69 min) | **3,871.6s (65 min)** |
+| Throughput | 25,377 rec/s | **121,270 rec/s** |
+| Compression | 670x | **1,460x** |
+
+**California joined 4.4x more data in less wall time than Indiana.** The
+throughput difference is mostly Indiana's block 92 (§5.5), which alone cost
+1,986s of that run; but California is faster even against Indiana's
+block-92-excluded rate of 49,186 rec/s, because its polygon side is 3.3x
+smaller and the broadcast per block is correspondingly cheaper.
+
+### Sanity checks against independently published figures
+
+The Indiana run was checked against a crop mix computed from the raster before
+the join was written. California admits a stronger check, because its signature
+crops exist almost nowhere else and their acreage is published:
+
+| Crop | This pipeline | Published (USDA, approx.) |
+|---|---|---|
+| Almonds | 1,542,209 acres | ~1.5M |
+| Grapes | 914,095 acres | ~0.9M |
+
+Neither figure was tuned. They fall out of joining a federal raster to a
+federal soil survey, and land on numbers published independently of both.
+Specialty crops are a sharper test than commodity totals: they occupy specific
+ground, so matching their acreage means the geometry is right, not just the
+arithmetic.
+
+Two further checks pass: total area 101.21M acres against California's ~101.5M
+acres of land, and agricultural land 8.93M acres (8.8%) against roughly 9.6M
+acres of harvested cropland.
+
+### The drought layer, which is why the AOI moved
+
+| Class | Acres |
+|---|---|
+| D0 abnormally dry | 47.66M |
+| D1 moderate | 19.31M |
+| D2 severe | 1.41M |
+| no drought | 32.83M |
+
+68.4M of 101.2M acres — **67.6% of the state** — in a drought class, across
+three severities. Indiana's equivalent was 3.8% in one class. §5.9 is closed by
+this table.
+
+### Follow-ups from this run
+
+- **The slow-block skew reproduced, and the standing hypothesis is dead.**
+  Three blocks took 61% of the elapsed time; the worst took 905s against a
+  4s median. §5.5 is updated with what was ruled out.
+- Indiana's `overlay_indiana.parquet` is untouched, so both states can be
+  served once the loader appends instead of truncating.
+
+---
+
 ## 10. The serving tier — built
 
 **Status: steps 1-5 are done and committed (2026-09-14); step 6, the deploy, is
