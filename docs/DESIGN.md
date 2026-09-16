@@ -1423,21 +1423,87 @@ React + TypeScript + MapLibre GL on Cloudflare Pages. Nothing blocks it:
   - The API base URL must be an environment variable — the quick-tunnel
     hostname changes on every tunnel restart (§13).
 
-**2. Re-run the benchmark on the VM.** §11's numbers are laptop numbers and
-do not transfer. Until this runs, no latency figure may appear beside the
-deployed link. Now unblocked and meaningful, because the polygon set follows
+**2. Re-run the benchmark — and understand that three variables moved, not
+one.** §11's chart measures Indiana, on raw geometry, on an M2 Pro. The
+deployed system is California, on simplified geometry, on a shared vCPU.
+Nothing about it transfers, and no latency figure may appear beside the
+deployed link until this runs. Now meaningful, because the polygon set follows
 the AOI (`scripts/make_bench_polygons.py`).
+
+| | benchmarked (§11) | deployed (§13) |
+|---|---|---|
+| Hardware | M2 Pro, 6 cores, 17 GB | shared vCPU, 969 MB, ~284 MB free |
+| Storage | NVMe | `pd-standard` |
+| AOI | Indiana — 155,025 rows, 1.48M polygons | California — 311,726 rows, 484K polygons |
+| Geometry | raw, 2.44 GB | simplified, 244 MB |
+
+**A prediction, recorded before measuring so it can be wrong.** `e2-micro` is
+burstable with a 0.25 vCPU baseline and `pd-standard` is slow, so the *uncached*
+path should get substantially worse. A cache hit is a Redis lookup regardless of
+CPU, so the *cached* path should barely move. If both hold, the cache's value
+looks **better** on the VM than on the laptop — the 62% tail reduction should
+grow, not shrink. The simplified table cuts the other way (10x less data to
+scan), so the uncached regression may be smaller than the hardware alone
+suggests.
+
+**Measure server-side and client-side separately.** Running the harness on the
+VM against `127.0.0.1:8000` isolates the service. Running it from a laptop
+against the tunnel measures what a visitor experiences, Cloudflare round trip
+included. Both are worth having; they are not the same number and must not be
+labelled as though they were.
+
+**Do not merge the new numbers into §11's chart.** Indiana-on-laptop and
+California-on-VM differ in three variables at once, so shared axes would imply a
+comparison neither supports — the exact failure mode §7 exists to prevent. If a
+comparison is wanted, run the 2x2 and label every series with its full
+configuration:
+
+| | laptop | VM |
+|---|---|---|
+| California, simplified | isolates the hardware change | the deployed figure |
+| Indiana, raw | §11 as it stands | not worth running |
+
+Two extra runs separate "what the hardware cost" from "what the data changed",
+which is a better story than either number alone.
 
 **3. A stable hostname.** The quick tunnel's URL changes on restart, which is
 fine for a proof and wrong for a resume link. Needs a domain on Cloudflare
 (~$10/year), which was declined; revisit when the frontend is worth linking to.
 
 **4. Add Indiana back alongside California.** Its overlay is on disk and
-already computed, so it is nearly free. Needs the loader to append rather than
-`TRUNCATE`, and the API to scope by state (`areasymbol` already carries it).
-Both states simplified is ~0.8 GB, which fits. Indiana's dense fine-grained
+already computed, so the expensive half is free. Indiana's dense fine-grained
 soil under uniform corn/soy against California's coarse soil under 67 crops
 makes a stronger claim than either alone.
+
+**Disk is not the constraint; RAM is.** Measured and projected:
+
+| | simplified |
+|---|---|
+| California geometry | 244 MB (measured) |
+| Indiana geometry | ~459 MB (2.44 GB at the measured 18.8%) |
+| Both overlays + `mukey_area` | ~47 MB |
+| **Total** | **~750 MB** |
+
+Against 27 GB of free disk that is nothing, and against ~284 MB of available
+RAM it is nearly 3x over. The hot path stays fine — `overlay` and `mukey_area`
+together are 47 MB and will stay resident, so cached answers are unaffected. It
+is the **cold** path that pays: a GiST lookup plus intersection against geometry
+that no longer fits in page cache, on slow `pd-standard`. Measure the uncached
+p95 before and after adding the second state rather than assuming it is
+tolerable; if it is not, load Indiana at a coarser tolerance, since it is the
+secondary state.
+
+Three changes needed:
+- `load_serving.py` `TRUNCATE`s all three tables, so it replaces rather than
+  appends. It needs a per-AOI load that leaves other states alone.
+- The API must scope by state. `areasymbol` already carries it — note the
+  California download legitimately contains AZ, NV and OR survey areas from the
+  bounding box (§5.10), so the scoping key is the AOI the row was loaded under,
+  not the survey-area prefix.
+- **The frontend has a real design problem here**, not just a toggle: two
+  regions two thousand miles apart with nothing in between. A state selector, a
+  zoomed-out US view with two lit regions, or separate entry points are all
+  plausible; this is a presentation decision and belongs with the frontend work.
 
 **5. Explain the cache result.** Deferred deliberately until the slice was up;
 it sharpens a number that is already defensible rather than unblocking
