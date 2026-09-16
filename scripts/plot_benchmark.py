@@ -148,7 +148,9 @@ def render(phases: list[dict], theme: str) -> str:
 
 
 def main() -> None:
-    src = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT
+    # Default to the committed results so the figure is reproducible from a
+    # clean checkout. The benchmark writes these; keep them in step.
+    src = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "scripts" / "bench_results"
     # The control comes first so the floor is read before the numbers that
     # include it. Every bar below contains this much transport.
     # Ordered by hit rate, because that is the variable that decides whether

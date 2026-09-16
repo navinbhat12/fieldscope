@@ -1,0 +1,90 @@
+{
+  "phase": "mixed",
+  "target_rate": 50.0,
+  "requests_per_run": 300,
+  "runs_kept": 3,
+  "p50_median_ms": 7.3,
+  "p50_range_ms": [
+    7.11,
+    7.67
+  ],
+  "p95_median_ms": 23.98,
+  "p95_range_ms": [
+    23.41,
+    31.43
+  ],
+  "achieved_rate_median": 50.0,
+  "hit_rate_median": 0.5,
+  "total_errors": 0,
+  "hardware": {
+    "platform": "macOS-26.6-arm64-arm-64bit",
+    "machine": "arm64",
+    "cpu": "Apple M2 Pro",
+    "cores": "10",
+    "memory_gb": 17.2,
+    "python": "3.11.16"
+  },
+  "runs": [
+    {
+      "requests": 300,
+      "ok": 300,
+      "errors": 0,
+      "error_codes": [],
+      "wall_s": 5.999,
+      "achieved_rate": 50.0,
+      "p50_ms": 7.51,
+      "p95_ms": 26.71,
+      "p99_ms": 135.51,
+      "min_ms": 2.45,
+      "max_ms": 647.86,
+      "cache_hits": 150,
+      "hit_rate": 0.5
+    },
+    {
+      "requests": 300,
+      "ok": 300,
+      "errors": 0,
+      "error_codes": [],
+      "wall_s": 6.002,
+      "achieved_rate": 50.0,
+      "p50_ms": 7.3,
+      "p95_ms": 23.41,
+      "p99_ms": 143.3,
+      "min_ms": 2.19,
+      "max_ms": 687.36,
+      "cache_hits": 150,
+      "hit_rate": 0.5
+    },
+    {
+      "requests": 300,
+      "ok": 300,
+      "errors": 0,
+      "error_codes": [],
+      "wall_s": 5.997,
+      "achieved_rate": 50.0,
+      "p50_ms": 7.67,
+      "p95_ms": 23.98,
+      "p99_ms": 145.63,
+      "min_ms": 2.06,
+      "max_ms": 655.62,
+      "cache_hits": 150,
+      "hit_rate": 0.5
+    },
+    {
+      "requests": 300,
+      "ok": 300,
+      "errors": 0,
+      "error_codes": [],
+      "wall_s": 6.0,
+      "achieved_rate": 50.0,
+      "p50_ms": 7.11,
+      "p95_ms": 31.43,
+      "p99_ms": 143.9,
+      "min_ms": 2.37,
+      "max_ms": 650.19,
+      "cache_hits": 150,
+      "hit_rate": 0.5
+    }
+  ],
+  "note": "Synthetic load against a local container. Not production traffic; this service has no users."
+}

@@ -1,0 +1,105 @@
+{
+  "phase": "uncached",
+  "target_rate": 50.0,
+  "requests_per_run": 300,
+  "runs_kept": 4,
+  "p50_median_ms": 7.8,
+  "p50_range_ms": [
+    7.76,
+    7.87
+  ],
+  "p95_median_ms": 63.9,
+  "p95_range_ms": [
+    62.16,
+    65.56
+  ],
+  "achieved_rate_median": 50.0,
+  "hit_rate_median": 0.0,
+  "total_errors": 0,
+  "hardware": {
+    "platform": "macOS-26.6-arm64-arm-64bit",
+    "machine": "arm64",
+    "cpu": "Apple M2 Pro",
+    "cores": "10",
+    "memory_gb": 17.2,
+    "python": "3.11.16"
+  },
+  "runs": [
+    {
+      "requests": 300,
+      "ok": 300,
+      "errors": 0,
+      "error_codes": [],
+      "wall_s": 5.994,
+      "achieved_rate": 50.0,
+      "p50_ms": 8.39,
+      "p95_ms": 65.99,
+      "p99_ms": 248.8,
+      "min_ms": 4.22,
+      "max_ms": 626.96,
+      "cache_hits": 0,
+      "hit_rate": 0.0
+    },
+    {
+      "requests": 300,
+      "ok": 300,
+      "errors": 0,
+      "error_codes": [],
+      "wall_s": 6.003,
+      "achieved_rate": 50.0,
+      "p50_ms": 7.85,
+      "p95_ms": 65.56,
+      "p99_ms": 229.34,
+      "min_ms": 3.39,
+      "max_ms": 613.24,
+      "cache_hits": 0,
+      "hit_rate": 0.0
+    },
+    {
+      "requests": 300,
+      "ok": 300,
+      "errors": 0,
+      "error_codes": [],
+      "wall_s": 6.003,
+      "achieved_rate": 50.0,
+      "p50_ms": 7.76,
+      "p95_ms": 64.39,
+      "p99_ms": 219.89,
+      "min_ms": 3.86,
+      "max_ms": 605.54,
+      "cache_hits": 0,
+      "hit_rate": 0.0
+    },
+    {
+      "requests": 300,
+      "ok": 300,
+      "errors": 0,
+      "error_codes": [],
+      "wall_s": 5.997,
+      "achieved_rate": 50.0,
+      "p50_ms": 7.76,
+      "p95_ms": 62.16,
+      "p99_ms": 216.92,
+      "min_ms": 3.53,
+      "max_ms": 616.1,
+      "cache_hits": 0,
+      "hit_rate": 0.0
+    },
+    {
+      "requests": 300,
+      "ok": 300,
+      "errors": 0,
+      "error_codes": [],
+      "wall_s": 6.003,
+      "achieved_rate": 50.0,
+      "p50_ms": 7.87,
+      "p95_ms": 63.41,
+      "p99_ms": 221.12,
+      "min_ms": 3.94,
+      "max_ms": 607.04,
+      "cache_hits": 0,
+      "hit_rate": 0.0
+    }
+  ],
+  "note": "Synthetic load against a local container. Not production traffic; this service has no users."
+}
