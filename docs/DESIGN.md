@@ -793,12 +793,13 @@ repository cites that, the sample size, and the hardware.
 | 3a | Indiana SSURGO acquisition (§5.8) | done |
 | 3b | State-scale join strategy (§5.5) | done — verified on county data |
 | 3c | The Indiana run itself | done — 2026-09-14, see §9 |
+| 3d | AOI swapped to California, for range and drought | done — 2026-09-15, see §9b |
 | 4 | Serving key design (§5.6) and store (§5.7) | done — decided 2026-09-14 |
 | 5a | FastAPI service + PostGIS + Redis, in Compose | done — 2026-09-14, see §10 |
 | 5b | Cache benchmark: p50/p95 by hit rate, stated load (§5.7) | done — 2026-09-14, see §11 |
-| 5c | Deploy to GCP behind Cloudflare Tunnel (§5.11) | **next** |
+| 5c | Deploy to GCP behind Cloudflare Tunnel (§5.11) | done — 2026-09-15, see §13 |
 | 5d | Terraform, CI — optional, not blocking (§5.11) | stretch |
-| 6 | Map frontend, public demo — needs §5.9 first | open |
+| 6 | Map frontend, public demo | **next** — §5.9 is closed, nothing blocks it |
 | 7 | Scheduled weekly drought refresh | ~~stretch~~ descoped 2026-09-15 (§5.4) |
 
 Milestone 3 is the load-bearing one: it is where the broadcast strategy of §5.3
@@ -961,11 +962,56 @@ acres of harvested cropland.
 three severities. Indiana's equivalent was 3.8% in one class. §5.9 is closed by
 this table.
 
-### Follow-ups from this run
+### The slow-block skew, reproduced — and the standing hypothesis is dead
 
-- **The slow-block skew reproduced, and the standing hypothesis is dead.**
-  Three blocks took 61% of the elapsed time; the worst took 905s against a
-  4s median. §5.5 is updated with what was ruled out.
+Indiana's block 92 cost 1,986s of a 4,103s run and was never explained; §5.5
+guessed at bounding-box polygon density. California reproduced the shape on
+completely different data, which made it diagnosable:
+
+| | |
+|---|---|
+| Blocks joined | 215 at time of measurement |
+| Median block | **4.0s** |
+| Blocks over 30s | **3** |
+| Time in those 3 | **1,458s — 61% of elapsed** |
+| Slowest block | **905s** |
+
+**Every hypothesis available from the data was ruled out by measurement.**
+Block 147 took 905s; block 276 took 4s. Comparing them:
+
+| | block 147 (905s) | block 276 (4s) |
+|---|---|---|
+| Points | 652,648 | 931,879 |
+| Polygons intersecting | 897 | **2,079** |
+| Total vertices | 176,890 | **353,448** |
+| Polygons with bbox over 10% of block | 5 | 11 |
+| Sum of polygon bbox area / block area | 11.4 | **18.9** |
+
+The slow block has **fewer points, fewer polygons, fewer vertices and less
+oversized-polygon coverage** than a block that ran 226x faster. Bounding-box
+density is not the mechanism, and neither is raw size on any axis.
+
+**The JVM was ruled out too**, from Spark's own metrics during the run: GC
+totalled 86s of 2,647s of task time (3.3%), peak storage memory was 1.33 GB of
+4.97 GB, and disk spill was zero. And it is not a warm-up effect — the first 40
+blocks ran at a 2-3s median, and the stalls appeared later and in isolated
+clusters with normal blocks either side.
+
+**What is left is outside the JVM**, most likely host-level memory pressure:
+the run held an 8 GB heap on a 16 GB laptop alongside Docker, and swap was
+observed at 13 GB of 14.3 GB allocated with the JVM's resident size oscillating
+between 3.4 and 7.1 GB. That is a hypothesis, not a finding — nothing was
+sampling memory when the three stalls actually happened. A sampler was armed
+afterwards (`free`/`vm_stat`/pageouts every 20s) and caught nothing, because the
+run went clean from block 140 onward.
+
+**Next step, unchanged in spirit but now much narrower:** run the join again
+with the memory sampler armed from the start and with Docker stopped, and see
+whether the stalls survive the removal of host memory pressure. That is a
+cheaper and more decisive experiment than anything geometric.
+
+### Other follow-ups
+
 - Indiana's `overlay_indiana.parquet` is untouched, so both states can be
   served once the loader appends instead of truncating.
 
@@ -1280,83 +1326,127 @@ the workload dominates the total, and in neither case does anything yet count
 what makes those cases different.
 
 
+## 13. The deploy
+
+**Status: live, 2026-09-15.** Milestone 5c.
+
+### What runs
+
+| | |
+|---|---|
+| Host | GCP `e2-micro`, `us-west1-b`, project `fieldscope-demo` |
+| Disk | 30 GB `pd-standard` (**not** the billable `pd-balanced` default) |
+| Memory | 969 MB total; 685 MB used with the stack up, 284 MB available |
+| Database | 295 MB — 311,726 overlay rows, 484,325 polygons, 20,811 map units |
+| Services | `db`, `cache`, `api` via Compose, all `restart: unless-stopped` |
+| Ingress | `cloudflared` quick tunnel, systemd unit `fieldscope-tunnel` |
+| Cost | ~$3.65/month for the external IPv4 (§5.11) |
+
+```bash
+gcloud compute ssh fieldscope --zone=us-west1-b --project=fieldscope-demo
+cd ~/fieldscope
+sudo docker compose -f docker-compose.yml -f docker-compose.vm.yml ps
+sudo systemctl status fieldscope-tunnel
+sudo grep -ohE 'https://[a-z0-9-]+\.trycloudflare\.com' /var/log/cloudflared.log | head -1
+```
+
+### How it was built, and why that way
+
+**The database was shipped as a `pg_dump -Fc -Z9`, not re-loaded.** 166 MB over
+the wire, restored in **37 seconds** including every index. Running
+`load_serving.py` on the VM instead would have meant reprojecting 484,325
+polygons on a shared vCPU — the local run takes 1.4 min on an M2 Pro, and the
+GiST build is the slowest part of it. Shipping the finished artefact is both
+faster and repeatable.
+
+**The simplified table is what made it fit.** 244 MB against 1,302 MB raw
+(§5.11). With 284 MB of memory free once the stack is up, the raw table would
+have thrashed a `pd-standard` disk on every uncached query. This is the
+deployment constraint the simplification work was for, and it was measured, not
+assumed.
+
+**`docker-compose.vm.yml` binds every service to loopback.** Nothing is
+published to the VM's public address; `cloudflared` runs on the host and dials
+out. Each `ports`/`volumes` key carries `!override`, which is load-bearing —
+Compose merges sequences by appending, so without it the base file's
+`0.0.0.0` bindings survive alongside the loopback ones.
+
+### The URL is temporary, and that is a known gap
+
+The tunnel is a **quick tunnel**, so the hostname is random and changes on every
+restart of the service. Cloudflare says plainly it is not for production. It
+proves the deployment works end to end and it costs nothing.
+
+A stable hostname needs a domain in a Cloudflare account, which is the one
+remaining paid dependency (~$10/year) and was declined for now. Converting is a
+`cloudflared tunnel create` plus a DNS record and a config file; nothing else in
+this section changes.
+
+### Not done here
+
+**The benchmark has not been re-run on this hardware.** §11's figures are from
+an M2 Pro with 6 cores. This is a shared vCPU with 284 MB free, and the numbers
+will be worse. They must not be quoted next to the deployed link until measured
+on it — `scripts/benchmark_serving.py` with
+`scripts/bench_polygons_california.json` is the command, and the polygon set is
+now AOI-correct so the measurement will mean something.
+
+---
+
 ## 12. Next steps
 
-Rewritten 2026-09-15, after the hosting budget was fixed at zero and the AOI
-was changed from "Indiana plus a few states" to "one state, chosen for range".
-Milestone numbers refer to §8.
+Rewritten 2026-09-15 at end of session. Milestone numbers refer to §8.
 
-**The order changed.** Deploy was previously first, on the reasoning that a
-link someone can click is the only thing missing. That still holds, but
-deploying Indiana would mean deploying a demo whose drought layer is empty
-(§5.9) and whose crop layer has two colours — and then redoing the load against
-a different state. The state swap now comes first because it is upstream of
-both the deploy and the frontend.
+**Where the project actually is.** Both halves are built, measured and
+deployed. The batch pipeline runs at state scale against California
+(§9b), the serving tier answers over the public internet (§13), and the
+three open design questions that were blocking — the drought layer (§5.9),
+the simplification cost (§5.11), and the AOI choice — are all closed with
+measurements. **The only thing missing from the product is the frontend.**
 
-**1. Swap the AOI to California.** Chosen for agricultural range: the widest
-crop mix in the country and its most severe drought record, so all three
-datasets show their full range against one AOI and §5.9 resolves itself without
-a historical backfill. The pilot's measured sizes are in § "Planned: more than
-one state" — the vector side is *smaller* than Indiana's; the raster side is
-~470M pixels against 104M and is the real cost.
+**1. The frontend (milestone 6). This is the whole remaining product.**
+React + TypeScript + MapLibre GL on Cloudflare Pages. Nothing blocks it:
+§5.9 is closed, the API is live, and Pages is free and needs no card.
 
-  - Acquisition: `download_boundaries.py`, `download_ssurgo.py`,
-    `download_cdl.py`, each `--aoi california`. All network-bound and resumable.
-  - The join is the expensive step and needs `--chunks` raised from Indiana's
-    12; block 92 (§5.5) showed what one oversized block costs, and California's
-    desert map units are large enough to make that failure mode more likely,
-    not less. Re-measure with a pilot before committing the full run.
-  - **Indiana is not deleted.** `overlay_indiana.parquet` stays on disk and the
-    loader still takes `--aoi`, so the swap is reversible if California's join
-    does not converge.
+  - **It has to be sleek, modern and clean, and designed for geo/map data
+    specifically.** This is Navin's explicit requirement and the surface
+    anyone evaluating the project actually sees. A competent, responsive map
+    is worth more here than another backend feature.
+  - Draw a field boundary, `POST /area`, render the crop / soil / drought
+    breakdown. A Central Valley field returns ~67 land-cover categories, so
+    the breakdown needs real information design, not a table dump — that is
+    a presentation problem, and it is the interesting part.
+  - Ships with a static snapshot of the overlay so the demo degrades rather
+    than breaking if the origin is down (§5.11).
+  - Label the drought layer with its USDM week: it is a snapshot, not a live
+    feed (§5.4, descoped).
+  - The API base URL must be an environment variable — the quick-tunnel
+    hostname changes on every tunnel restart (§13).
 
-**2. Simplify the served geometry (§5.11).** Measured at 18.8% of raw at a 30 m
-tolerance, which is what makes 1 GB of RAM workable. Do this as a load-time
-step so the raw geometry stays in Parquet and the decision stays reversible.
-Measure the area error it introduces against the raw geometry before quoting
-any acreage from the simplified table.
+**2. Re-run the benchmark on the VM.** §11's numbers are laptop numbers and
+do not transfer. Until this runs, no latency figure may appear beside the
+deployed link. Now unblocked and meaningful, because the polygon set follows
+the AOI (`scripts/make_bench_polygons.py`).
 
-**3. Deploy (5c).** `gcloud compute instances create` for an `e2-micro` on the
-Always Free tier, `docker compose up`, `cloudflared` for ingress (§5.11). Needs
-account access, so it is not unattended work. Ship the loaded database as a
-`pg_dump -Fc` rather than re-running the loader on the VM: the local dump of
-Indiana is 2.13 GB from a 3.7 GB database, and restoring a dump asks far less
-of a shared vCPU than reprojecting 1.5M polygons on it. **The laptop benchmark
-does not transfer** — §11 has to be re-run on the VM before any figure is
-quoted next to the deployed link.
+**3. A stable hostname.** The quick tunnel's URL changes on restart, which is
+fine for a proof and wrong for a resume link. Needs a domain on Cloudflare
+(~$10/year), which was declined; revisit when the frontend is worth linking to.
 
-**4. Frontend.** React + TypeScript + MapLibre on Cloudflare Pages (§5.11).
-**It has to be interactive and modern** — this is the surface anyone evaluating
-the project actually sees, and a competent map that responds well is worth more
-than another backend feature. Ships with a static snapshot of the overlay so
-the demo degrades rather than breaking if the origin is down.
+**4. Add Indiana back alongside California.** Its overlay is on disk and
+already computed, so it is nearly free. Needs the loader to append rather than
+`TRUNCATE`, and the API to scope by state (`areasymbol` already carries it).
+Both states simplified is ~0.8 GB, which fits. Indiana's dense fine-grained
+soil under uniform corn/soy against California's coarse soil under 67 crops
+makes a stronger claim than either alone.
 
-**5. Explain the cache result, after the vertical slice is up.** §11 measures
-*that* Redis cuts the tail without moving the median; it does not explain
-*why*, and the explanation is what makes the number worth talking about. Three
-questions, in order:
+**5. Explain the cache result.** Deferred deliberately until the slice was up;
+it sharpens a number that is already defensible rather than unblocking
+anything. The three questions and the cheap first step are unchanged: why the
+median is already fast, what makes p95 slow, and how a warm cache removes it.
 
-  - Why is the median already fast? The no-op control costs 5.03 ms p50 against
-    a 7.8 ms uncached median, so the query itself is only ~2.8 ms and there is
-    almost nothing for a cache to remove at p50.
-  - What specifically makes p95 slow? Uncached p99 is 220 ms and the slowest
-    single request was 616 ms. The hypothesis is that a few polygons touch many
-    more map units than typical. The cheap first step is to correlate `/area`
-    latency against the map-unit count the endpoint already returns.
-  - How does a warm cache remove it? Presumably by skipping the PostGIS
-    intersection entirely for exactly those expensive polygons — which should
-    be visible as the tail collapsing toward the control floor rather than the
-    whole distribution shifting.
+**6. The slow-block skew (§5.5).** Reproduced on California and materially
+narrowed — see that section for what was ruled out. Still open.
 
-  This is deliberately *after* the deploy and the frontend. It sharpens a
-  number that is already defensible; it does not unblock anything.
-
-**6. The heavy tail's cousin: block 92 (§5.5).** The join and the serving path
-show the same shape — a small part of the workload dominating the total, with
-nothing counting what makes those cases different. Worth doing once, in a way
-that answers both.
-
-**Explicitly not next.** Terraform and CI (§5.11) remain optional and
-non-blocking. Alembic stays unnecessary until a loaded VM exists and a reload
-costs an hour rather than three minutes (§ "Amendments made during the build").
-Additional states beyond the chosen one are out of scope at zero budget.
+**Explicitly not next.** Terraform and CI (§5.11) remain optional. Alembic
+stays unnecessary. The weekly drought refresh is descoped (§5.4). More states
+beyond a second are out of scope.

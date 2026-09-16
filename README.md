@@ -9,12 +9,38 @@ underneath it — soil composition, crop cover, and current drought conditions �
 as a single low-latency lookup, rather than as an expensive geometric
 computation performed per request.
 
-> **Status: batch pipeline and API both built and measured; not yet deployed.**
-> The distributed join runs at state scale and the serving tier answers against
-> its output locally. Every figure in this README is measured from an actual
-> run, with the method stated beside it. The frontend and the public deployment
-> are not built yet and are described as targets. No performance claim appears
-> here until it has been benchmarked, and the benchmark is labelled as such.
+> **Status: pipeline, API and public deployment all built and measured. The
+> frontend is not.** The distributed join runs at state scale over California,
+> and the serving tier answers over the public internet from a GCP `e2-micro`
+> behind a Cloudflare Tunnel. Every figure in this README is measured from an
+> actual run, with the method stated beside it. The map frontend is the one
+> remaining piece of the product. No performance claim appears here until it has
+> been benchmarked, and the benchmark is labelled as such — note in particular
+> that the latency figures below are from a laptop and have **not** yet been
+> re-measured on the deployed hardware.
+
+---
+
+## Live
+
+The API is deployed on a GCP `e2-micro` behind a Cloudflare Tunnel:
+
+```bash
+curl -X POST https://<tunnel-host>/area \
+  -H 'Content-Type: application/json' \
+  -d '{"geometry":{"type":"Polygon","coordinates":[[[-119.852,36.648],[-119.848,36.648],[-119.848,36.652],[-119.852,36.652],[-119.852,36.648]]]}}'
+```
+
+That polygon is a 39-acre field near Fresno. It comes back with 67 land-cover
+categories — grapes, almonds, citrus, pistachios, walnuts — weighted by how much
+of each soil map unit the boundary covers.
+
+**The hostname is not stable yet.** The deployment currently uses a Cloudflare
+*quick tunnel*, whose URL changes every time the tunnel restarts, so it is
+deliberately not written into this README. A permanent hostname needs a domain
+on Cloudflare; see [docs/DESIGN.md §13](docs/DESIGN.md). Run
+`sudo grep -ohE 'https://[a-z0-9-]+\.trycloudflare\.com' /var/log/cloudflared.log | head -1`
+on the VM for the current one.
 
 ---
 
@@ -29,7 +55,7 @@ all three geometrically.
 So the interesting work happens before anyone asks a question. An offline job
 on Spark reconciles all three layers once — projecting them into a common
 equal-area grid, resolving which soil polygon every 30-metre pixel falls in,
-and collapsing 104 million records into 155,025 rows that say what grows on
+and collapsing 455 million records into 311,726 rows that say what grows on
 each soil map unit. That output is the product. The API on top of it is
 deliberately boring: find the map units a drawn polygon touches, look up rows
 that already exist, add them up.
@@ -62,39 +88,71 @@ OFFLINE (batch, scheduled)              ONLINE (container)
 │         │                  │          └────────────────────────────┘
 │         ▼                  │
 │ overlay.parquet            │           Docker Compose on one VM,
-│  155,025 rows              │           behind Cloudflare
+│  311,726 rows              │           behind Cloudflare
 └────────────────────────────┘
 ```
 
 ## Scale
 
-Scope is Indiana. The pipeline is developed against a single county for fast
-iteration, then run unchanged across the state.
+The pipeline is developed against a single county for fast iteration, then run
+unchanged across a state. It has been run over two: Indiana first, to prove the
+join at state scale, and then California, which is what the live demo serves.
 
-| | Tippecanoe County | Indiana |
-|---|---|---|
-| Land cover records | 2,079,440 | 104,126,688 |
-| Soil polygons | 30,264 | 1,482,366 |
-| Distinct soil map units | 429 | 7,534 |
-| Soil geometry on disk | 36.6 MB | 2.1 GB |
-| **Join wall time** | **median 20.5s** | **4,103s** |
-| **Throughput** | **~101,000 records/sec** | **25,377 records/sec** |
-| Records matched to soil | 1,875,956 (90.2%) | 104,125,537 (99.999%) |
-| Precomputed output rows | 5,349 (389:1 compression) | 155,025 (672:1 compression) |
+| | Tippecanoe County | Indiana | **California** |
+|---|---|---|---|
+| Land cover records | 2,079,440 | 104,126,688 | **455,106,622** |
+| Soil polygons | 30,264 | 1,482,366 | 484,325 |
+| Distinct soil map units | 429 | 7,534 | 20,811 |
+| **Join wall time** | **median 20.5s** | **4,103s** | **3,752s** |
+| **Throughput** | **~101,000 rec/s** | **25,377 rec/s** | **121,270 rec/s** |
+| Records matched to soil | 1,875,956 (90.2%) | 104,125,537 (99.999%) | 455,079,266 (99.994%) |
+| Precomputed output rows | 5,349 (389:1) | 155,025 (672:1) | 311,726 (1,460:1) |
 
-Every figure above is measured. The state join ran on 2026-09-14 and took 69
-minutes end to end.
+Every figure above is measured. California joined **4.4x more data than Indiana
+in less wall time**, because its soil layer has a third as many polygons — soil
+survey detail follows survey intensity, not area, and California's deserts and
+rangeland are mapped in very large units.
 
-The state throughput is far below the county's, and that is a real finding
+California is what the demo serves, for a reason that is about the data rather
+than the engineering: Indiana is corn and soybeans on uniform glacial soils and
+has essentially no drought in any given week, so two of the three layers show
+their full range and the third renders blank. California has the widest crop mix
+in the country and a real drought signature — 68% of the state across three
+severities in the week this ran. A single 39-acre query near Fresno returns 67
+distinct land-cover categories.
+
+Indiana's throughput is far below the county's, and that is a real finding
 rather than a rounding of it: one grid block out of 144 took 1,986s of the
 4,103s join — roughly 400x its neighbours — and the remaining 137 non-empty
 blocks averaged under 10 seconds each. Grid chunking assumes blocks are
-comparable work, and one block violates that badly. The cause is not yet
-established; see [docs/DESIGN.md §5.5](docs/DESIGN.md).
+comparable work, and one block violates that badly.
 
-Statewide the result reproduces, to the digit, percentages measured
-independently from the raster before the join existed: corn at 23.69% and
-soybeans at 22.93% of 23,156,980 acres.
+The same skew reappeared on California — three blocks took 61% of the elapsed
+time, the worst at 905s against a 4s median — which made it possible to test the
+obvious explanations, and none of them survived. The slowest block has *fewer*
+points, *fewer* polygons, *fewer* vertices and *less* oversized-polygon coverage
+than a block that ran 226x faster. Spark's own metrics rule out garbage
+collection (3.3% of task time), memory pressure and disk spill. The cause is
+still not established, and the current suspicion is host-level memory pressure
+rather than anything about the data; see [docs/DESIGN.md §5.5](docs/DESIGN.md).
+
+Indiana's result reproduces, to the digit, percentages measured independently
+from the raster before the join existed: corn at 23.69% and soybeans at 22.93%
+of 23,156,980 acres.
+
+California admits a sharper check, because its signature crops grow almost
+nowhere else and their acreage is published independently:
+
+| Crop | This pipeline | USDA, approx. |
+|---|---|---|
+| Almonds | 1,542,209 acres | ~1.5M |
+| Grapes | 914,095 acres | ~0.9M |
+
+Neither number was tuned. They fall out of joining a federal raster to a federal
+soil survey, and land on figures published independently of both. Specialty
+crops are a harder test than commodity totals: they occupy specific ground, so
+matching their acreage means the geometry is right and not just the arithmetic.
+Total area lands at 101.21M acres against California's ~101.5M.
 
 Timings come from `scripts/benchmark.py` on a 10-core local Spark session:
 median of 11 runs, range 14.6–54.3s. That spread is JVM warmup and page cache
@@ -334,14 +392,18 @@ Three things that cost real debugging time, recorded so they cost it once:
 - [x] Data acquisition — all four sources scripted and verified
 - [x] Exploration and cross-layer validation
 - [x] Spark + Sedona distributed join, validated against single-machine truth
-- [x] Indiana inputs acquired — 104,126,688 land cover records, 1,341,119 soil polygons
 - [x] A join strategy that survives state scale, verified on county data
-- [x] The Indiana run itself — 104,125,537 records joined, 155,025 rows out
-- [x] Serving store — PostgreSQL + PostGIS, 1.48M soil polygons loaded and indexed
+- [x] The Indiana run — 104,125,537 records joined, 155,025 rows out
+- [x] The California run — 455,079,266 records joined, 311,726 rows out, and a
+      drought layer with three severities across 68% of the state
+- [x] Serving store — PostgreSQL + PostGIS, loaded and indexed
 - [x] API — `GET /mapunit/{mukey}` and `POST /area` over the precomputed overlay
 - [x] Redis read-through cache, keyed by the normalised polygon
-- [x] Latency benchmarking under stated synthetic load
-- [ ] Deploy — GCP e2-micro behind a Cloudflare Tunnel
-- [ ] Map frontend
-- [ ] More states, so the drought layer has something to show
-- [ ] Scheduled weekly refresh of the drought layer
+- [x] Latency benchmarking under stated synthetic load — *on a laptop*
+- [x] Deploy — GCP e2-micro behind a Cloudflare Tunnel, answering publicly
+- [ ] **Map frontend** — the one remaining piece of the product
+- [ ] Re-measure the benchmark on the deployed hardware
+- [ ] A stable hostname (the quick tunnel's URL changes on restart)
+- [ ] Indiana served alongside California
+- [x] ~~Scheduled weekly refresh of the drought layer~~ — descoped; the layer is
+      a labelled snapshot of one USDM week
