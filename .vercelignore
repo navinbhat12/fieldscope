@@ -1,14 +1,13 @@
-# What Vercel builds is frontend/ (the project's Root Directory). Everything
-# else in this repository is the batch pipeline, and none of it belongs in a
-# deployment upload.
+# Keep the deployment upload to the frontend's own tree.
 #
-# data/ alone is 8.4 GB. It is already in .gitignore, which the CLI falls back
-# to -- but the fallback stops applying the moment this file exists, so the
-# exclusions that matter are repeated here rather than inherited.
-data/
-.venv/
-scripts/
-src/
-docs/
-serving/
+# Every pattern is anchored with a leading slash, and that is load-bearing: an
+# unanchored `src/` matches at any depth, so it eats frontend/src/ as well as
+# this repository's Python src/. That failed a build with "Failed to resolve
+# /src/main.tsx" -- the app's own source had been filtered out from under it.
+#
+# Only the genuinely large trees are listed. Vercel applies this file to git
+# builds as well as CLI uploads, so anything named here is invisible to the
+# build, and a shorter list has less to get wrong.
+/data/
+/.venv/
 *.log
