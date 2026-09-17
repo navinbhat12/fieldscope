@@ -42,7 +42,21 @@ export default function App() {
       // The numbers are small and arrive first; the geometry can be hundreds
       // of kilobytes, so it is not allowed to hold up the readout.
       const areaPromise = fetchArea(geometry, ctl.signal)
-      const unitsPromise = fetchMapUnits(geometry, ctl.signal)
+
+      // The geometry is decoration over an answer that stands without it, so
+      // it is not allowed to fail the request either -- a panel reporting "that
+      // did not work" over numbers it successfully fetched would be a lie.
+      //
+      // It also must not reject on its own. Both requests start together but
+      // are awaited one at a time, so whichever is not being awaited when an
+      // abort lands would surface as an unhandled rejection -- and every
+      // redraw aborts.
+      const unitsPromise = fetchMapUnits(geometry, ctl.signal).catch((err) => {
+        if (!(err instanceof DOMException && err.name === 'AbortError')) {
+          console.warn('Fieldscope: the map unit geometry did not load.', err)
+        }
+        return null
+      })
 
       const areaResult = await areaPromise
       if (ctl.signal.aborted) return
@@ -50,7 +64,7 @@ export default function App() {
       setStatus('ready')
 
       const unitsResult = await unitsPromise
-      if (ctl.signal.aborted) return
+      if (ctl.signal.aborted || !unitsResult) return
       setMapUnits(unitsResult)
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') return
