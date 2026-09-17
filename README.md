@@ -23,7 +23,16 @@ computation performed per request.
 
 ## Live
 
-The API is deployed on a GCP `e2-micro` behind a Cloudflare Tunnel:
+**https://fieldscope-three.vercel.app** — draw a field, or open one of these:
+
+- [Almond orchard](https://fieldscope-three.vercel.app/?f=smg9lCv6o_jHAggmCok4BAA__lC) — Fresno County, prime soil farmed to its capability
+- [Idle cropland](https://fieldscope-three.vercel.app/?f=oi4wgCzt_u_GAgnE8vDAA_mE) — ten acres of Hanford loam, fully cultivable, almost nothing growing
+- [Steep forest in drought](https://fieldscope-three.vercel.app/?f=o2--uC7kykrHAwtlBkicAAvtlB) — Siskiyou County, class 5-8 ground across three USDM severities
+
+Every drawn field goes in the URL, so any answer is a link (§14.6).
+
+The frontend is static on Vercel. The API behind it is deployed on a GCP
+`e2-micro` behind a Cloudflare Tunnel:
 
 ```bash
 curl -X POST https://<tunnel-host>/area \
@@ -35,12 +44,26 @@ That polygon is a 39-acre field near Fresno. It comes back with 67 land-cover
 categories — grapes, almonds, citrus, pistachios, walnuts — weighted by how much
 of each soil map unit the boundary covers.
 
-**The hostname is not stable yet.** The deployment currently uses a Cloudflare
-*quick tunnel*, whose URL changes every time the tunnel restarts, so it is
-deliberately not written into this README. A permanent hostname needs a domain
-on Cloudflare; see [docs/DESIGN.md §13](docs/DESIGN.md). Run
-`sudo grep -ohE 'https://[a-z0-9-]+\.trycloudflare\.com' /var/log/cloudflared.log | head -1`
-on the VM for the current one.
+**The API hostname is not stable, and the site above depends on it.** The
+deployment uses a Cloudflare *quick tunnel*, whose URL changes every time the
+tunnel restarts, so it is deliberately not written into this README. Vite
+inlines `VITE_API_BASE_URL` at build time, which means a tunnel restart leaves
+the deployed frontend pointing at a hostname that no longer exists — the map
+still loads and every query reports that it could not reach the API. The fix is
+two commands, not a code change:
+
+```bash
+# on the VM: the current hostname
+sudo grep -ohE 'https://[a-z0-9-]+\.trycloudflare\.com' /var/log/cloudflared.log | tail -1
+
+# locally, from frontend/
+vercel env rm VITE_API_BASE_URL production --yes
+printf 'https://<new-host>' | vercel env add VITE_API_BASE_URL production
+vercel --prod
+```
+
+A permanent hostname needs a domain on Cloudflare (~$10/year, declined for
+now) and would close this for good; see [docs/DESIGN.md §13](docs/DESIGN.md).
 
 ---
 
@@ -401,7 +424,8 @@ Three things that cost real debugging time, recorded so they cost it once:
 - [x] Redis read-through cache, keyed by the normalised polygon
 - [x] Latency benchmarking under stated synthetic load — *on a laptop*
 - [x] Deploy — GCP e2-micro behind a Cloudflare Tunnel, answering publicly
-- [ ] **Map frontend** — the one remaining piece of the product
+- [x] Map frontend — React + MapLibre, drawing against the deployed API
+- [x] Frontend deployed — static on Vercel, with fields as shareable links
 - [ ] Re-measure the benchmark on the deployed hardware
 - [ ] A stable hostname (the quick tunnel's URL changes on restart)
 - [ ] Indiana served alongside California

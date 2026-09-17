@@ -1382,6 +1382,28 @@ remaining paid dependency (~$10/year) and was declined for now. Converting is a
 `cloudflared tunnel create` plus a DNS record and a config file; nothing else in
 this section changes.
 
+### §14 shipped to this host — 2026-09-16
+
+The six changed `serving/app` modules, `schema.sql` and `load_serving.py` were
+copied up and the image rebuilt in **11 seconds** -- `requirements.txt` did not
+change, so the pip layer cached and only the two `COPY` layers rebuilt.
+
+The attribute table was **shipped, not downloaded**. `download_soil_attributes.py`
+needs `pandas` and `requests`, which the API image does not carry, and reads the
+overlay parquet, which this host does not have -- its database came from a
+`pg_dump`. Loading the 461 KB parquet produced by the local run is the same
+"ship the finished artefact" decision the database restore already made.
+
+`load_serving.py --only attrs` had to be fixed first: it validated the overlay
+parquet on every path, including the one that never reads it, so an attrs-only
+load failed on a host that legitimately has no overlay.
+
+Counts after the load: `overlay` 311,726 · `soil_polygon` 484,325 ·
+`mukey_area` 20,811 · `mapunit_attr` **19,607**. The shortfall against 20,811 is
+1,204 map units with no `muaggatt` row -- open water, rock outcrop, made land --
+which is the case the nullable columns were designed around, not a gap. The
+loader flushed Redis, so no pre-§14 payload survived the upgrade.
+
 ### Not done here
 
 **The benchmark has not been re-run on this hardware.** §11's figures are from
@@ -1542,6 +1564,124 @@ A note on verification method: Vite's dev server returns `200 text/html` for
 *any* unknown path, so "the file returns 200" proves nothing. Check the
 content-type, or check disk.
 
+### 14.6 A field is a link
+
+Added 2026-09-16.
+
+The tool answers a question about one particular shape, and that shape lived
+only in browser memory: you could describe what you found but not show anyone.
+A drawn field now goes in the URL and a URL restores it, which is the
+difference between a demo and something that can be sent.
+
+**The encoding, and why not JSON.** Vertices are stored as deltas, zig-zag
+coded, six bits per character. Measured on a 24-vertex field: **135 characters
+encoded against 803 as URL-escaped GeoJSON**, and the committed four-corner
+examples come to 24-27. The saving is that successive vertices of one field
+differ in the fourth decimal place, so a delta costs two characters where an
+absolute coordinate costs eleven.
+
+**The classic polyline alphabet was tried and abandoned.** `chr(n + 63)` spans
+63-126, which contains `?`, `|`, `~`, `{`, `}`, `\` and backtick -- every one
+percent-escaped by a query string. Measured: the almond example went from 22
+characters to 41, undoing most of the point. The same six-bit chunks map onto
+`A-Za-z0-9-_` at no cost, since a chunk is six bits either way and all 64 are
+unreserved. The price is that the string no longer pastes into an off-the-shelf
+polyline decoder, which is a debugging convenience and worth less than the link
+being short.
+
+**Precision 6, matching `Settings.coord_precision`.** The server already rounds
+to six places before building a cache key, so the encoding loses nothing the
+server would have kept -- and a shared link lands on the cache entry its
+original draw populated rather than recomputing a field that differs in the
+eighth decimal.
+
+**Verification.** 303 polygons -- the three committed examples plus all 300 in
+`bench_polygons_california.json` -- round-trip to identical coordinates.
+Malformed, truncated and out-of-alphabet input returns null rather than
+throwing or producing a polygon at longitude 400.
+
+### 14.7 Two more bugs, both exposed by the link
+
+Neither was introduced by §14.6; both predate it and had no path that reached
+them until a field could arrive before the pointer drew one.
+
+**Terra Draw threw into a React effect and took the map with it.** The control
+starts its Terra Draw instance from its own `map.once('load')`, and calling any
+method earlier throws `Terra Draw is not enabled`. From inside an effect that
+throw reaches the error boundary, which unmounts the entire map -- so the
+symptom was not "the shared field did not draw" but "the map is gone". A field
+in the URL is ready to be drawn *before* the control is ready to draw it, so
+the new path hit it every time. Every call now goes through one helper that
+does what the control does at its own entry points (`enabled || start()`) and
+retries per frame if the control is not constructed yet, bounded so that a tool
+which never comes up says so once instead of spinning.
+
+**A cancelled request became an unhandled rejection.** `/area` and
+`/area/mapunits` are issued together and awaited one at a time, so whichever
+was not being awaited when an abort landed rejected with nobody listening --
+and every redraw aborts. The geometry request can no longer reject at all,
+which also closes a worse case: a failed `/area/mapunits` used to blank the
+panel and report "that did not work" over numbers `/area` had already returned
+successfully.
+
+---
+
+## 15. The frontend deploy
+
+**Status: live, 2026-09-16.** https://fieldscope-three.vercel.app
+
+| | |
+|---|---|
+| Host | Vercel Hobby, static build, project `fieldscope` |
+| Root | `frontend/`, framework auto-detected as Vite |
+| Cost | $0 |
+| API | the `e2-micro` of §13, via `VITE_API_BASE_URL` |
+
+**Why Vercel and not Cloudflare Pages**, which §5.11 originally named: both are
+free and either would serve a static bundle. §12.7 had already recommended
+Vercel for the frontend specifically, the CLI links and deploys in two
+commands, and nothing about the choice disturbs the container deploy it talks
+to. This supersedes the Pages line in §5.11.
+
+**The team-scoped URL is not the public one.** Vercel aliases a production
+deployment at both `fieldscope-three.vercel.app` and
+`fieldscope-navin-bhats-projects.vercel.app`; the second is team-scoped and
+answers 302 to an SSO login. That is normal platform behaviour and not a
+protection setting -- but a portfolio link pasted from the wrong one would send
+every reader to a login page, so the public alias is the one recorded here and
+in the README.
+
+### The one fragility, and it is real
+
+`VITE_API_BASE_URL` is inlined by Vite **at build time**. The API sits behind a
+quick tunnel whose hostname rotates on restart (§13). So a tunnel restart
+leaves the deployed site pointing at a hostname that no longer resolves: the
+map still loads, the panel still draws, and every query reports that it could
+not reach the API.
+
+The repair is an env var and a redeploy, documented in the README, and takes
+about a minute. The permanent fix is the same $10/year domain §13 already
+names, which would make the hostname stable and delete this section.
+
+A runtime lookup -- fetching the base URL from a small static file instead of
+inlining it -- was considered and rejected: it moves the edit from an env var
+to a file but still needs a redeploy for the change to reach anyone, so it buys
+nothing and adds a request to every page load.
+
+### Verified end to end
+
+- Public alias answers 200 without authentication.
+- The built bundle contains the tunnel hostname, so the env var reached the
+  build rather than silently defaulting to `localhost:8000`.
+- CORS preflight from `https://fieldscope-three.vercel.app` to the tunnel
+  returns `access-control-allow-origin: *` with `POST` permitted.
+- A `POST /area` carrying that `Origin` returned the Fresno field's 631.704
+  acres across 9 map units in **158 ms**, cached.
+
+**Not verified: the page in a browser.** There was no browser automation in the
+session that deployed it, so the React behaviour is checked by types, by build,
+and by the request path above -- not by eye.
+
 ---
 
 ## 12. Next steps
@@ -1555,15 +1695,31 @@ three open design questions that were blocking — the drought layer (§5.9),
 the simplification cost (§5.11), and the AOI choice — are all closed with
 measurements. **The only thing missing from the product is the frontend.**
 
-**0. STATUS 2026-09-16 — the frontend exists and runs locally.** §14 records
-what was built: the API gained CORS, drought and a geometry endpoint; SSURGO's
-tabular attributes were added as a dimension table; a rules-based reading of
-each field ships inside the cached `/area` response; and a React/MapLibre
-frontend renders it. **It has only ever run locally — the VM still serves the
-pre-§14 API, and nothing is deployed.** Items 1-7 below are written as they
-stood before that work; read them against §14.
+**0. STATUS 2026-09-16, end of session — the product is deployed, end to end.**
+§14 records what was built, §15 where the frontend runs, and §13 the rollout of
+§14 to the API host. A visitor can open https://fieldscope-three.vercel.app,
+draw a field, and get an answer computed against 311,726 overlay rows — and
+send the result to someone else as a link.
 
-**1. The frontend (milestone 6). This is the whole remaining product.**
+**What is actually left**, in the order it matters:
+
+1. **Re-measure the benchmark on the VM** (item 2 below). Still the one
+   outstanding claim: no latency figure may sit beside the deployed link until
+   it runs. A serial probe on the VM measured **104 ms median** for an uncached
+   `/area` (28-276 ms, n=15), so single-threaded capacity is ~10 req/s against
+   the 50 req/s §11 drove on a laptop. The rate has to be chosen deliberately,
+   not inherited, or the run measures queue collapse instead of latency.
+2. **Frontend polish that was scoped and not built:** map↔panel hover linking,
+   click-to-drill into `GET /mapunit/{mukey}` — still the only endpoint the UI
+   never calls — live acreage while drawing, and compare-two-fields.
+3. **A stable API hostname** (item 3). It now has a second reason to exist:
+   §15's deployed frontend inlines the tunnel hostname at build time, so a
+   tunnel restart breaks the live site until someone redeploys it.
+
+Items 1-7 below were written on 2026-09-15 and are kept for their reasoning.
+Item 1 is **done**; item 7's frontend half is **done**, its API half still open.
+
+**1. The frontend (milestone 6). DONE — see §14 and §15.**
 React + TypeScript + MapLibre GL on Cloudflare Pages. Nothing blocks it:
 §5.9 is closed, the API is live, and Pages is free and needs no card.
 

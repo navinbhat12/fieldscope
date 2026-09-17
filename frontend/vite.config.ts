@@ -5,6 +5,10 @@ import tailwindcss from '@tailwindcss/vite'
 export default defineConfig({
   plugins: [react(), tailwindcss()],
 
+  // MapLibre creates its worker with `{ type: 'module' }`, so the emitted
+  // worker bundle has to be an ES module. Vite's build default is iife.
+  worker: { format: 'es' },
+
   optimizeDeps: {
     // maplibre-gl ships its own web worker and resolves it relative to its own
     // module URL. Vite's dependency pre-bundler rewrites the entry but does
