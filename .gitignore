@@ -43,5 +43,9 @@ CLAUDE.md
 # Local Claude Code permissions. Personal workflow config, stays local.
 .claude/settings.local.json
 
-# Vercel CLI project link (frontend/.vercel).
+# Vercel CLI project link and the OIDC token it writes beside it. The link
+# lives at the repository root because the project's Root Directory is
+# frontend/, so the CLI deploys from here rather than from inside it.
 .vercel/
+.env*
+!.env.example

@@ -1,0 +1,14 @@
+# What Vercel builds is frontend/ (the project's Root Directory). Everything
+# else in this repository is the batch pipeline, and none of it belongs in a
+# deployment upload.
+#
+# data/ alone is 8.4 GB. It is already in .gitignore, which the CLI falls back
+# to -- but the fallback stops applying the moment this file exists, so the
+# exclusions that matter are repeated here rather than inherited.
+data/
+.venv/
+scripts/
+src/
+docs/
+serving/
+*.log
