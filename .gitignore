@@ -42,3 +42,6 @@ CLAUDE.md
 
 # Local Claude Code permissions. Personal workflow config, stays local.
 .claude/settings.local.json
+
+# Vercel CLI project link (frontend/.vercel).
+.vercel/
