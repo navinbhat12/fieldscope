@@ -1680,7 +1680,47 @@ nothing and adds a request to every page load.
 
 **Not verified: the page in a browser.** There was no browser automation in the
 session that deployed it, so the React behaviour is checked by types, by build,
-and by the request path above -- not by eye.
+and by the request path above -- not by eye. This is how the worker bug below
+reached production.
+
+### The deploy is git-driven
+
+`navinbhat12/fieldscope`, production branch `main`, Root Directory `frontend`.
+A push to `main` builds and promotes; the CLI link lives at the repository root
+rather than in `frontend/`, because with a Root Directory set the CLI deploys
+from the repository root and deploying from inside `frontend/` would have
+Vercel look for `frontend/frontend`.
+
+The first git-triggered build failed in 7 seconds, and the cause is worth
+keeping. A `.vercelignore` had just been added to keep `data/` (8.4 GB) out of
+CLI uploads, listing `src/` among others. Those are gitignore patterns: **`src/`
+is unanchored and matches at any depth**, so it also matched `frontend/src/`,
+and Vercel applies the file to git builds as well as CLI uploads. The build
+died on `Failed to resolve /src/main.tsx from frontend/index.html` -- the app's
+own source filtered out of its own build. Every pattern is anchored now, and
+the file lists only the two trees whose size was the reason for it.
+
+### The map did not render, and why the §14.5 fix did not cover it
+
+MapLibre derives its worker URL from its own `import.meta.url` and expects
+`maplibre-gl-worker.mjs` as a sibling. That holds when the package is served as
+authored -- which is exactly why `optimizeDeps.exclude` was enough for the
+development server (§14.5). It does not hold in a production build, where
+MapLibre is bundled into `assets/index-<hash>.js`: the sibling it looks for has
+never existed, the worker 404s, and the `Map` constructor throws into the error
+boundary. **The first deployed build rendered no map at all.**
+
+No bundler emits that file unprompted, because the path is a ternary over a
+dev/prod filename and cannot be followed statically. Importing the worker with
+`?worker&url` makes the bundler build it as its own chunk -- with its
+`./maplibre-gl-shared.mjs` import inlined -- and `setWorkerUrl` points MapLibre
+at it. Workers are emitted as ES modules to match the `{ type: 'module' }`
+MapLibre constructs them with. One mechanism now, development and production,
+instead of two that fail in different places.
+
+Verified against the deployed site: the worker the bundle requests answers 200
+at 508,762 bytes, and `/assets/maplibre-gl-worker.mjs` -- the path it used to
+request -- still 404s.
 
 ---
 
@@ -1701,20 +1741,32 @@ measurements. **The only thing missing from the product is the frontend.**
 draw a field, and get an answer computed against 311,726 overlay rows — and
 send the result to someone else as a link.
 
-**What is actually left**, in the order it matters:
+**What is left, in the order Navin set on 2026-09-16:**
 
-1. **Re-measure the benchmark on the VM** (item 2 below). Still the one
+1. **More UI.** The scoped-but-unbuilt list from §12.1: map↔panel hover
+   linking, click-to-drill into `GET /mapunit/{mukey}` — still the only
+   endpoint the API serves that the UI never calls — live acreage while
+   drawing, and compare-two-fields. §14.6 shipped the first of that set.
+2. **Indiana alongside California** (item 4 below, unchanged and still the
+   best-reasoned entry here). Its overlay is already computed, so the
+   expensive half is free; the constraint is RAM, not disk, and the cold path
+   is what pays. Item 4 names the three changes and the measurement to take
+   before and after.
+3. **Re-measure the benchmark on the VM** (item 2 below). Still the one
    outstanding claim: no latency figure may sit beside the deployed link until
    it runs. A serial probe on the VM measured **104 ms median** for an uncached
-   `/area` (28-276 ms, n=15), so single-threaded capacity is ~10 req/s against
-   the 50 req/s §11 drove on a laptop. The rate has to be chosen deliberately,
-   not inherited, or the run measures queue collapse instead of latency.
-2. **Frontend polish that was scoped and not built:** map↔panel hover linking,
-   click-to-drill into `GET /mapunit/{mukey}` — still the only endpoint the UI
-   never calls — live acreage while drawing, and compare-two-fields.
-3. **A stable API hostname** (item 3). It now has a second reason to exist:
-   §15's deployed frontend inlines the tunnel hostname at build time, so a
-   tunnel restart breaks the live site until someone redeploys it.
+   `/area` (28-276 ms, min 28, max 276, n=15), so single-threaded capacity is
+   ~10 req/s against the 50 req/s §11 drove on a laptop. **The rate has to be
+   chosen, not inherited**, or the run measures queue collapse rather than
+   latency. Decided in advance: measure server-side on the VM against
+   `127.0.0.1` for the full phase set, and client-side from a laptop through
+   the tunnel for warm and mixed-0.5 only, so the e2-micro does not run the
+   expensive phases twice.
+
+Also open, and cheaper than any of the three: **a stable API hostname** (item 3
+below). It has a second reason to exist now — §15's frontend inlines the tunnel
+hostname at build time, so a tunnel restart breaks the live site until someone
+redeploys it.
 
 Items 1-7 below were written on 2026-09-15 and are kept for their reasoning.
 Item 1 is **done**; item 7's frontend half is **done**, its API half still open.

@@ -425,9 +425,12 @@ Three things that cost real debugging time, recorded so they cost it once:
 - [x] Latency benchmarking under stated synthetic load — *on a laptop*
 - [x] Deploy — GCP e2-micro behind a Cloudflare Tunnel, answering publicly
 - [x] Map frontend — React + MapLibre, drawing against the deployed API
-- [x] Frontend deployed — static on Vercel, with fields as shareable links
-- [ ] Re-measure the benchmark on the deployed hardware
-- [ ] A stable hostname (the quick tunnel's URL changes on restart)
+- [x] Frontend deployed — static on Vercel, git-driven from `main`, with fields
+      as shareable links
+- [ ] More UI — hover linking, click-to-drill, live acreage, compare two fields
 - [ ] Indiana served alongside California
+- [ ] Re-measure the benchmark on the deployed hardware
+- [ ] A stable hostname (the quick tunnel's URL changes on restart, which now
+      also breaks the deployed frontend until it is rebuilt)
 - [x] ~~Scheduled weekly refresh of the drought layer~~ — descoped; the layer is
       a labelled snapshot of one USDM week
