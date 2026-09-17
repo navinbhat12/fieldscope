@@ -291,10 +291,20 @@ def main() -> None:
     soil_path = DATA / "raw" / f"ssurgo_{args.aoi}.parquet"
     attr_path = DATA / "interim" / f"soil_attributes_{args.aoi}.parquet"
 
-    for path in (overlay_path, soil_path):
-        if args.only in ("all", "soil") or path == overlay_path:
-            if not path.exists():
-                sys.exit(f"missing input: {path}")
+    # Check only the inputs this run will actually read. The VM holds the
+    # attribute parquet and nothing else -- its database was restored from a
+    # pg_dump rather than loaded (§13) -- so demanding the overlay for an
+    # attrs-only run fails a load that needs no overlay.
+    required = []
+    if args.only in ("all", "overlay"):
+        required.append(overlay_path)
+    if args.only in ("all", "soil"):
+        required.append(soil_path)
+    if args.only == "attrs":
+        required.append(attr_path)
+    for path in required:
+        if not path.exists():
+            sys.exit(f"missing input: {path}")
 
     started = time.time()
     with psycopg.connect(dsn_from_env(), autocommit=False) as conn:
