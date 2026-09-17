@@ -113,3 +113,22 @@ export interface MapUnitGeometry {
 }
 
 export type DrawnPolygon = GeoJSON.Polygon | GeoJSON.MultiPolygon
+
+/**
+ * A field put on the map by something other than the pointer: a stored
+ * example, or a shared link.
+ */
+export interface PlacedField {
+  geometry: DrawnPolygon
+  /**
+   * How to frame it. A stored example carries curated framing; a shared link
+   * is fitted to its own bounds, because whoever sent it chose the field and
+   * not the camera.
+   */
+  view: { center: [number, number]; zoom: number } | 'fit'
+  /**
+   * Distinguishes two placements of the same field, so that picking the same
+   * example twice redraws it rather than silently doing nothing.
+   */
+  nonce: number
+}

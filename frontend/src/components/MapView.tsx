@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 // maplibre-gl v6 is ESM-only with named exports and no default export.
 // `Map` is aliased because the global of that name is very much still in use.
 import {
@@ -10,8 +10,8 @@ import {
 import { MaplibreTerradrawControl } from '@watergis/maplibre-gl-terradraw'
 import { BASEMAP_STYLE, type Aoi } from '../config'
 import { colorForCode } from '../landcover'
-import type { DrawnPolygon, MapUnitGeometry } from '../types'
-import type { ExampleField } from '../examples'
+import { boundsOf } from '../share'
+import type { DrawnPolygon, MapUnitGeometry, PlacedField } from '../types'
 
 const EMPTY: GeoJSON.FeatureCollection = { type: 'FeatureCollection', features: [] }
 
@@ -24,8 +24,8 @@ interface Props {
   mapUnits: MapUnitGeometry | null
   onPolygon: (geometry: DrawnPolygon) => void
   onClear: () => void
-  /** Set to draw a stored field; cleared by the parent once handled. */
-  example: ExampleField | null
+  /** Set to draw a field the pointer did not trace: an example, or a link. */
+  placed: PlacedField | null
   /** Bumped by the parent to fly out to the whole AOI. */
   overviewNonce: number
   /** Bumped by the parent to re-arm the polygon tool. */
@@ -55,7 +55,7 @@ export function MapView({
   mapUnits,
   onPolygon,
   onClear,
-  example,
+  placed,
   overviewNonce,
   armNonce,
 }: Props) {
@@ -63,6 +63,12 @@ export function MapView({
   const mapRef = useRef<MapLibreMap | null>(null)
   const drawRef = useRef<MaplibreTerradrawControl | null>(null)
   const loadedRef = useRef(false)
+
+  // Loading is also *state*, not only a ref: a field arriving in the URL is
+  // known before the map exists, so the effect that draws it has to re-run
+  // once the map is ready rather than give up. A ref alone would not re-render
+  // and the shared field would never appear.
+  const [ready, setReady] = useState(false)
 
   // The handlers are attached once, when the map is built, but they must call
   // the current render's callbacks -- so they read through a ref rather than
@@ -139,6 +145,7 @@ export function MapView({
 
     map.on('load', () => {
       loadedRef.current = true
+      setReady(true)
       map.addSource(SRC, { type: 'geojson', data: EMPTY })
 
       map.addLayer({
@@ -173,6 +180,7 @@ export function MapView({
 
     return () => {
       loadedRef.current = false
+      setReady(false)
       observer.disconnect()
       drawRef.current = null
       map.remove()
@@ -189,9 +197,9 @@ export function MapView({
     source?.setData(mapUnits ? paint(mapUnits) : EMPTY)
   }, [mapUnits])
 
-  // Draw a stored example and fly to it.
+  // Draw a field that arrived from somewhere other than the pointer.
   useEffect(() => {
-    if (!example) return
+    if (!placed || !ready) return
     const map = mapRef.current
     const terra = drawRef.current?.getTerraDrawInstance()
     if (!map || !terra) return
@@ -200,13 +208,35 @@ export function MapView({
       {
         id: crypto.randomUUID(),
         type: 'Feature',
-        geometry: example.geometry as GeoJSON.Polygon,
+        geometry: placed.geometry as GeoJSON.Polygon,
         properties: { mode: 'polygon' },
       },
     ])
-    map.flyTo({ center: example.center, zoom: example.zoom, duration: 900 })
+
+    if (placed.view === 'fit') {
+      const bounds = boundsOf(placed.geometry)
+      // Pad past the panel. The panel is an overlay, so MapLibre knows nothing
+      // about it and would centre the field underneath it -- which on a small
+      // field means framing it perfectly and then hiding it.
+      if (bounds) {
+        map.fitBounds(bounds, {
+          padding: {
+            top: 72,
+            bottom: 72,
+            left: 72,
+            right: Math.min(470, Math.round(window.innerWidth * 0.5)),
+          },
+          // A ten-acre field fitted to the viewport would sit at zoom 18,
+          // past the point where the basemap has anything to say.
+          maxZoom: 16,
+          duration: 900,
+        })
+      }
+    } else {
+      map.flyTo({ center: placed.view.center, zoom: placed.view.zoom, duration: 900 })
+    }
     terra.setMode('polygon')
-  }, [example])
+  }, [placed, ready])
 
   useEffect(() => {
     if (armNonce === 0) return

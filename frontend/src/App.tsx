@@ -1,11 +1,12 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { MapView } from './components/MapView'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { ResultsPanel } from './components/ResultsPanel'
 import { ApiError, fetchArea, fetchMapUnits } from './api'
 import { DEFAULT_AOI, AOIS, API_BASE } from './config'
 import { EXAMPLES, type ExampleField } from './examples'
-import type { AreaResponse, DrawnPolygon, MapUnitGeometry } from './types'
+import { fieldFromUrl, writeFieldToUrl } from './share'
+import type { AreaResponse, DrawnPolygon, MapUnitGeometry, PlacedField } from './types'
 
 type Status = 'idle' | 'loading' | 'ready' | 'error'
 
@@ -15,7 +16,7 @@ export default function App() {
   const [error, setError] = useState<{ message: string; tooLarge: boolean } | null>(null)
   const [area, setArea] = useState<AreaResponse | null>(null)
   const [mapUnits, setMapUnits] = useState<MapUnitGeometry | null>(null)
-  const [example, setExample] = useState<ExampleField | null>(null)
+  const [placed, setPlaced] = useState<PlacedField | null>(null)
   const [overviewNonce, setOverviewNonce] = useState(0)
   const [armNonce, setArmNonce] = useState(0)
 
@@ -30,6 +31,12 @@ export default function App() {
 
     setStatus('loading')
     setError(null)
+
+    // The link describes the field, not the answer, so it is written when the
+    // question is asked rather than when it comes back. A field that turns out
+    // to be too large still produces a link that reproduces exactly that --
+    // which is the honest thing for a link to do.
+    writeFieldToUrl(geometry)
 
     try {
       // The numbers are small and arrive first; the geometry can be hundreds
@@ -60,6 +67,8 @@ export default function App() {
 
   const handleClear = useCallback(() => {
     inflight.current?.abort()
+    writeFieldToUrl(null)
+    setPlaced(null)
     setStatus('idle')
     setError(null)
     setArea(null)
@@ -67,9 +76,23 @@ export default function App() {
   }, [])
 
   const loadExample = (ex: ExampleField) => {
-    setExample(ex)
+    setPlaced((prev) => ({
+      geometry: ex.geometry,
+      view: { center: ex.center, zoom: ex.zoom },
+      nonce: (prev?.nonce ?? 0) + 1,
+    }))
     runQuery(ex.geometry)
   }
+
+  // A field arriving in the URL. Read once, on arrival: later edits to the
+  // address bar are this app's own `replaceState` calls, and re-reading them
+  // would put the page in a loop with itself.
+  useEffect(() => {
+    const shared = fieldFromUrl()
+    if (!shared) return
+    setPlaced({ geometry: shared, view: 'fit', nonce: 1 })
+    runQuery(shared)
+  }, [runQuery])
 
   return (
     <div className="relative h-full w-full overflow-hidden">
@@ -88,7 +111,7 @@ export default function App() {
           mapUnits={mapUnits}
           onPolygon={runQuery}
           onClear={handleClear}
-          example={example}
+          placed={placed}
           overviewNonce={overviewNonce}
           armNonce={armNonce}
         />
@@ -105,11 +128,14 @@ export default function App() {
 
       <aside className="absolute top-4 right-16 bottom-4 z-10 flex w-[380px] max-w-[calc(100vw-5rem)] flex-col overflow-hidden rounded-2xl border border-rule bg-card/92 backdrop-blur-md">
         <div className="border-b border-rule px-5 py-4">
-          <div className="text-[10.5px] font-medium tracking-[0.09em] text-muted uppercase">
-            {status === 'idle' && 'Draw a field'}
-            {status === 'loading' && 'Measuring…'}
-            {status === 'ready' && 'Under this field'}
-            {status === 'error' && 'That did not work'}
+          <div className="flex items-center justify-between gap-3">
+            <div className="text-[10.5px] font-medium tracking-[0.09em] text-muted uppercase">
+              {status === 'idle' && 'Draw a field'}
+              {status === 'loading' && 'Measuring…'}
+              {status === 'ready' && 'Under this field'}
+              {status === 'error' && 'That did not work'}
+            </div>
+            {status === 'ready' && <CopyLinkButton />}
           </div>
 
           {status === 'idle' && (
@@ -203,5 +229,50 @@ function ExampleButtons({
         ))}
       </div>
     </div>
+  )
+}
+
+/**
+ * Copy the current field's link.
+ *
+ * The URL is already correct before this is pressed -- `runQuery` writes it on
+ * every draw -- so this is a convenience over the address bar, not the
+ * mechanism. That is why a copy failure is not an error state: the link is
+ * still there to be copied by hand, and saying so is more useful than an
+ * apology.
+ *
+ * `navigator.clipboard` needs a secure context, which covers https and
+ * localhost but not a bare-IP origin over http, so the failure path is real
+ * rather than defensive.
+ */
+function CopyLinkButton() {
+  const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle')
+
+  // A component that unmounts while the "Copied" timer is pending would
+  // otherwise set state on nothing.
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current) }, [])
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(window.location.href)
+      setState('copied')
+    } catch {
+      setState('failed')
+    }
+    if (timer.current) clearTimeout(timer.current)
+    timer.current = setTimeout(() => setState('idle'), 2400)
+  }
+
+  return (
+    <button
+      onClick={copy}
+      title="A link that reopens this exact field"
+      className="shrink-0 rounded-md border border-rule px-2 py-1 text-[10.5px] whitespace-nowrap text-muted transition-colors hover:border-muted hover:text-ink"
+    >
+      {state === 'idle' && 'Copy link'}
+      {state === 'copied' && 'Link copied'}
+      {state === 'failed' && 'In the address bar'}
+    </button>
   )
 }
